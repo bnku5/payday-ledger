@@ -262,6 +262,8 @@ const collectionDone = d => debtBalance(d) <= .005;
 
 function periodSummary() {
   const pp = payPeriod();
+  const sb = profile.startBalance;
+  if (sb && sb.date >= toStr(pp.start) && sb.date <= toStr(pp.end)) return startPeriodSummary(pp, sb);
   const list = between(toStr(pp.start), toStr(pp.end));
   const direct = sumAmt(ofType(list, 'income').filter(e => !isSpread(e)));
   const spread = r2(all().filter(isSpread).reduce((s, e) => s + spreadShare(e, pp.start, pp.end), 0));
@@ -276,6 +278,22 @@ function periodSummary() {
   const safe = r2(base - spent - saved - saveLeft - billsLeft);
   const daysLeft = Math.max(1, daysBetween(today(), pp.next));
   return { pp, expected, base, spread, spent, saved, saveLeft, billsLeft, safe, daysLeft, perDay: safe / daysLeft, list };
+}
+
+/* The first pay period counts down from the bank balance you started with.
+   Only what you log after setting it counts, and bills still due before payday come out of it. */
+function startPeriodSummary(pp, sb) {
+  const to = toStr(pp.end);
+  const after = all().filter(e => e.date >= sb.date && e.date <= to && (e.created || 0) >= (sb.at || 0));
+  const spread = r2(after.filter(isSpread).reduce((s, e) => s + spreadShare(e, parseD(sb.date), pp.end), 0));
+  const income = sumAmt(ofType(after, 'income').filter(e => !isSpread(e)));
+  const base = r2(Number(sb.amount) + income + spread);
+  const spent = sumAmt(ofType(after, 'expense'));
+  const saved = sumAmt(ofType(after, 'save'));
+  const billsLeft = r2(billsBetween(today() > parseD(sb.date) ? today() : parseD(sb.date), pp.end).filter(b => !b.paid).reduce((s, b) => s + Number(b.bill.amount || 0), 0));
+  const safe = r2(base - spent - saved - billsLeft);
+  const daysLeft = Math.max(1, daysBetween(today(), pp.next));
+  return { pp, start: sb, expected: false, base, spread, spent, saved, saveLeft: 0, billsLeft, safe, daysLeft, perDay: safe / daysLeft, list: after };
 }
 
 function planSteps() {
@@ -452,6 +470,8 @@ function viewOnboarding() {
       <label class="field"><span>State</span><select id="ob-state" name="state"><option value="MN">Minnesota</option><option value="other">Another state</option></select></label>
       <label class="field" id="ob-state-rate" hidden><span>State tax % (rough)</span><input name="stateRate" inputmode="decimal" placeholder="4.5"></label>
     </div>
+    <label class="field"><span>Money in your bank account right now</span><input id="ob-balance" name="balance" inputmode="decimal" placeholder="$312.40">
+      <span class="hint">Just what’s left today. Your game starts from this, and your first pay period counts down from it. Leave it blank to start from your next paycheck.</span></label>
     <label class="field"><span>Monthly rent <span class="muted">(optional)</span></span><input id="ob-rent" name="rent" inputmode="decimal" placeholder="$900"></label>
     <label class="field"><span>How hard do you want to save?</span>
       <select id="ob-split" name="split">${Object.entries(SPLITS).map(([k, s]) => `<option value="${k}" ${k === 'balanced' ? 'selected' : ''}>${s.label}</option>`).join('')}</select>
@@ -467,7 +487,7 @@ function viewHome() {
   const t = today();
   const parts = [
     { k: 'Spent', v: s.spent, c: 'var(--chart-spend)' },
-    { k: 'Bills set-aside', v: s.billsLeft, c: 'var(--warn)' },
+    { k: s.start ? 'Bills due before payday' : 'Bills set-aside', v: s.billsLeft, c: 'var(--warn)' },
     { k: 'Savings', v: Math.max(s.saved, 0) + s.saveLeft, c: 'var(--accent)' },
   ];
   const total = Math.max(s.base, parts.reduce((a, p) => a + p.v, 0), 1);
@@ -496,7 +516,7 @@ function viewHome() {
       </div>
       <div class="meter" role="img" aria-label="How this paycheck is split">${parts.map(p => p.v > 0 ? `<i style="width:${(p.v / total * 100).toFixed(1)}%;background:${p.c}"></i>` : '').join('')}${s.safe > 0 ? '<i style="flex:1;background:var(--line)"></i>' : ''}</div>
       <div class="ledger">
-        <div class="row"><span class="key">${s.expected ? 'Expected paycheck' : 'Income this period'}</span><span class="num">${money(s.base)}</span></div>
+        <div class="row"><span class="key">${s.start ? (s.base > s.start.amount ? 'Starting balance + income' : `Starting balance (${short(s.start.date)})`) : s.expected ? 'Expected paycheck' : 'Income this period'}</span><span class="num">${money(s.base)}</span></div>
         ${s.spread > 0 ? `<div class="row small muted"><span>incl. scholarship spread</span><span class="num">${money(s.spread)}</span></div>` : ''}
         ${parts.map(p => `<div class="row"><span class="key"><i class="dot" style="background:${p.c}"></i>${p.k}</span><span class="num">−${money(p.v)}</span></div>`).join('')}
         <div class="row total"><span>Left to spend</span><span class="num">${money(s.safe)}</span></div>
@@ -1050,6 +1070,8 @@ function openSettings() {
           <label class="field"><span class="hint">Wants</span><input name="wants" type="number" min="0" max="100" value="${p.split.wants}"></label>
           <label class="field"><span class="hint">Savings</span><input name="save" type="number" min="0" max="100" value="${p.split.save}"></label>
         </div></div>
+      <label class="field"><span>Starting balance <span class="muted">(optional)</span></span><input name="startBal" inputmode="decimal" value="${p.startBalance ? Number(p.startBalance.amount).toFixed(2) : ''}" placeholder="$0.00">
+        <span class="hint">${p.startBalance ? `Set ${short(p.startBalance.date)}. ` : ''}What’s in your bank account right now. Your current pay period counts down from it until your next payday. Change it to start over from today.</span></label>
       <label class="field"><span>401(k) match starts <span class="muted">(optional)</span></span><input name="match" type="date" value="${esc(p.matchDate || '')}"></label>
       <p class="err" id="s-err" hidden></p>
       <button class="btn primary block" type="submit">Save settings</button>
@@ -1329,6 +1351,8 @@ const forms = {
     profile.split = { needs: split.needs, wants: split.wants, save: split.save };
     const monthly = pay * ppy() / 12;
     const rent = parseAmt(fd.get('rent'));
+    const bal = parseAmt(fd.get('balance'));
+    if (isFinite(bal)) profile.startBalance = { amount: bal, date: toStr(today()), at: Date.now() };
     const round5 = v => Math.max(0, Math.round(v / 5) * 5);
     const b = {};
     for (const c of CATS) if (c.w) b[c.id] = round5(monthly * c.w * (c.group === 'wants' ? split.wants / 30 : 1));
@@ -1468,6 +1492,9 @@ const forms = {
     } else profile.typicalPay = parseAmt(fd.get('pay')) || profile.typicalPay;
     profile.split = { needs: n, wants: w, save: s };
     profile.matchDate = fd.get('match') || '';
+    const sbRaw = String(fd.get('startBal') || '').trim(), sbAmt = parseAmt(sbRaw);
+    if (!sbRaw) delete profile.startBalance;
+    else if (isFinite(sbAmt) && (!profile.startBalance || sbAmt !== profile.startBalance.amount)) profile.startBalance = { amount: sbAmt, date: toStr(today()), at: Date.now() };
     saveProfile(); closeSheet(); render(); toast('Settings saved');
   },
   hero(f, fd) {

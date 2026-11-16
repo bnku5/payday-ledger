@@ -115,6 +115,8 @@ async function load() {
   const saved = [main, mirror].filter(Boolean).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0))[0] || null;
   profile = normalize(saved && saved.profile);
   entries = new Map(((saved && saved.entries) || []).map(e => [e.id, e]));
+  // Paid one-time bills drop off the list a month after their due date; the payment stays in your history
+  profile.bills = profile.bills.filter(b => !(isOnce(b) && parseD(b.due) < addDays(today(), -30) && billPayment(billKey(b, parseD(b.due)))));
 }
 let BACKUP = null;
 /* Average of your last 3 real paychecks; it becomes your "usual paycheck" when you plan with real amounts. */
@@ -231,13 +233,25 @@ function monthlyOutflow() {
 }
 
 /* Bills: monthly on a day, or every two weeks from a start date */
-const billMonthly = b => (Number(b.amount) || 0) * (b.freq === 'biweekly' ? 26 / 12 : 1);
+const isOnce = b => b.freq === 'once';
+const billMonthly = b => isOnce(b) ? 0 : (Number(b.amount) || 0) * (b.freq === 'biweekly' ? 26 / 12 : 1);
 const billsMonthly = () => profile.bills.reduce((s, b) => s + billMonthly(b), 0);
-const billShare = () => r2(billsMonthly() * 12 / ppy());
-const billKey = (b, d) => b.id + ':' + (b.freq === 'biweekly' ? toStr(d) : ymStr(d));
+const billKey = (b, d) => b.id + ':' + (b.freq === 'monthly' || !b.freq ? ymStr(d) : toStr(d));
+/* Pay periods from the one containing a to the one containing b, counting both. */
+function periodsSpan(a, b) { let n = 1, p = payPeriod(a); while (p.end < b && n < 120) { p = payPeriod(p.next); n++; } return n; }
+/* One-time bills are saved up for evenly across the paychecks between when you added them and when they're due. */
+function onceShare() {
+  const pp = payPeriod();
+  return profile.bills.filter(b => isOnce(b) && !billPayment(billKey(b, parseD(b.due)))).reduce((s, b) => {
+    const due = parseD(b.due), amt = Number(b.amount) || 0;
+    return s + (due < pp.start ? amt : amt / periodsSpan(new Date(b.created || Date.now()), due));
+  }, 0);
+}
+const billShare = () => r2(billsMonthly() * 12 / ppy() + onceShare());
 const billPayment = key => all().find(e => e.billKey === key);
 function billDates(b, from, to) {
   const out = [];
+  if (isOnce(b)) { const d = parseD(b.due); if (d >= from && d <= to) out.push(d); return out; }
   if (b.freq === 'biweekly') {
     const a = parseD(b.anchor || toStr(today()));
     let d = addDays(a, Math.ceil(daysBetween(a, from) / 14) * 14);
@@ -255,6 +269,8 @@ function billDates(b, from, to) {
 function billsBetween(from, to) {
   const out = [];
   for (const b of profile.bills) for (const d of billDates(b, from, to)) { const key = billKey(b, d); out.push({ bill: b, date: d, key, paid: !!billPayment(key) }); }
+  // One-time bills that are past due and still unpaid stay on the list until paid
+  for (const b of profile.bills.filter(isOnce)) { const d = parseD(b.due), key = billKey(b, d); if (d < from && to >= today() && !billPayment(key)) out.push({ bill: b, date: d, key, paid: false }); }
   return out.sort((a, b) => a.date - b.date);
 }
 
@@ -403,7 +419,7 @@ function artiSays() {
   const foodOut = sumAmt(ofType(ml, 'expense').filter(e => e.catId === 'dining' || e.catId === 'delivery'));
   const foodBudget = (Number(profile.budgets.dining) || 0) + (Number(profile.budgets.delivery) || 0);
   const ready = profile.wants.filter(w => !w.decided && Date.now() - w.added >= COOL_OFF_H * 36e5);
-  const subs = profile.bills.filter(b => b.catId === 'subs');
+  const subs = profile.bills.filter(b => b.catId === 'subs' && !isOnce(b));
   const subsYear = subs.reduce((a, b) => a + billMonthly(b), 0) * 12;
   const cards = profile.debts.filter(d => isCardDebt(d) && debtBalance(d) > .005).sort((a, b) => b.apr - a.apr);
   const nextDay = dLabel(s.pp.next, { weekday: 'long' });
@@ -675,7 +691,7 @@ function viewBudget() {
   const debts = profile.debts;
   const sim = simulatePayoff(profile.debtMethod, profile.debtExtra);
   const totalDebt = debts.reduce((s, d) => s + debtBalance(d), 0);
-  const subs = profile.bills.filter(b => b.catId === 'subs');
+  const subs = profile.bills.filter(b => b.catId === 'subs' && !isOnce(b));
   const freedYear = profile.freed.reduce((s, f) => s + f.monthly * 12, 0);
   const colls = debts.filter(d => d.type === 'collection');
 
@@ -702,10 +718,13 @@ function viewBudget() {
 
   <section>
     <div class="sec-head"><h2>Bills</h2><button class="link" data-action="bill">Add bill</button></div>
-    ${profile.bills.length ? `<div class="list">${[...profile.bills].sort((a, b) => (a.freq === 'biweekly') - (b.freq === 'biweekly') || a.dueDay - b.dueDay).map(b => {
+    ${profile.bills.length ? `<div class="list">${[...profile.bills].filter(b => !isOnce(b)).sort((a, b) => (a.freq === 'biweekly') - (b.freq === 'biweekly') || a.dueDay - b.dueDay).map(b => {
       const nxt = billDates(b, today(), addDays(today(), 62))[0];
       return `<button class="item" data-action="bill" data-id="${esc(b.id)}"><div class="glyph ${catOf(b.catId).group}" aria-hidden="true">${esc(b.name.slice(0, 2))}</div><div class="main"><div class="title">${esc(b.name)}</div><div class="sub">${b.freq === 'biweekly' ? 'Every 2 weeks' : 'Monthly on the ' + ordinal(b.dueDay)}${nxt ? ' · next ' + short(nxt) : ''}</div></div><span class="amt">${money(b.amount)}</span></button>`;
-    }).join('')}<div class="item"><div class="main"><b>Per month</b><div class="sub">${money(billShare())} set aside from each paycheck</div></div><span class="amt">${money(billsMonthly())}</span></div></div>`
+    }).join('')}${profile.bills.filter(isOnce).sort((a, b) => a.due.localeCompare(b.due)).map(b => {
+      const paid = !!billPayment(billKey(b, parseD(b.due))), late = !paid && parseD(b.due) < today();
+      return `<button class="item" data-action="bill" data-id="${esc(b.id)}"><div class="glyph ${catOf(b.catId).group}" aria-hidden="true">1×</div><div class="main"><div class="title">${esc(b.name)}</div><div class="sub">One time · due ${short(b.due)}</div></div><span class="amt">${money(b.amount)}</span>${paid ? '<span class="pill good">Paid</span>' : late ? '<span class="pill bad">Late</span>' : ''}</button>`;
+    }).join('')}<div class="item"><div class="main"><b>Recurring per month</b><div class="sub" style="white-space:normal">${money(billShare())} set aside from each paycheck${onceShare() > 0 ? `, including ${money(onceShare())} toward one-time bills` : ''}</div></div><span class="amt">${money(billsMonthly())}</span></div></div>`
       : '<div class="card empty"><strong>No bills yet</strong><span>Fixed bills get set aside from every paycheck automatically.</span><button class="btn sm" data-action="bill">Add a bill</button></div>'}
   </section>
 
@@ -1013,16 +1032,18 @@ function openWant() {
 }
 
 function openBill(id) {
-  const b = profile.bills.find(x => x.id === id) || { name: '', amount: '', dueDay: '', catId: 'housing', freq: 'monthly', anchor: toStr(today()), debtId: '' };
+  const b = profile.bills.find(x => x.id === id) || { name: '', amount: '', dueDay: '', catId: 'housing', freq: 'monthly', anchor: toStr(today()), due: toStr(addDays(today(), 14)), debtId: '' };
   openSheet(id ? 'Edit bill' : 'Add a bill', `
     <form data-form="bill" data-id="${esc(id || '')}">
       <label class="field"><span>Name</span><input id="b-name" name="name" value="${esc(b.name)}" placeholder="Rent, phone, gym, card payment…" required maxlength="40" ${id ? '' : 'autofocus'}></label>
-      <div class="seg" role="radiogroup" aria-label="How often"><label><input type="radio" name="freq" value="monthly" ${b.freq !== 'biweekly' ? 'checked' : ''} data-action="bill-freq">Monthly</label><label><input type="radio" name="freq" value="biweekly" ${b.freq === 'biweekly' ? 'checked' : ''} data-action="bill-freq">Every 2 weeks</label></div>
+      <div class="seg" role="radiogroup" aria-label="How often"><label><input type="radio" name="freq" value="monthly" ${b.freq !== 'biweekly' && b.freq !== 'once' ? 'checked' : ''} data-action="bill-freq">Monthly</label><label><input type="radio" name="freq" value="biweekly" ${b.freq === 'biweekly' ? 'checked' : ''} data-action="bill-freq">Every 2 weeks</label><label><input type="radio" name="freq" value="once" ${b.freq === 'once' ? 'checked' : ''} data-action="bill-freq">One time</label></div>
       <div class="fields-2">
         <label class="field"><span>Amount</span><input id="b-amt" name="amount" inputmode="decimal" value="${b.amount === '' ? '' : Number(b.amount).toFixed(2)}" placeholder="$0.00" required></label>
-        <label class="field" id="b-day-wrap" ${b.freq === 'biweekly' ? 'hidden' : ''}><span>Due day of month</span><input id="b-day" name="day" type="number" min="1" max="31" value="${esc(b.dueDay)}" placeholder="1–31"></label>
+        <label class="field" id="b-due-wrap" ${b.freq !== 'once' ? 'hidden' : ''}><span>Due date</span><input id="b-due" name="due" type="date" value="${esc(b.due || toStr(addDays(today(), 14)))}"></label>
+        <label class="field" id="b-day-wrap" ${b.freq === 'biweekly' || b.freq === 'once' ? 'hidden' : ''}><span>Due day of month</span><input id="b-day" name="day" type="number" min="1" max="31" value="${esc(b.dueDay)}" placeholder="1–31"></label>
         <label class="field" id="b-anchor-wrap" ${b.freq !== 'biweekly' ? 'hidden' : ''}><span>Next charge date</span><input id="b-anchor" name="anchor" type="date" value="${esc(b.anchor || toStr(today()))}"></label>
       </div>
+      <p class="hint" id="b-once-hint" ${b.freq !== 'once' ? 'hidden' : ''}>Paid once, then done. Until then, a share comes out of each paycheck so the full amount is ready by the due date.</p>
       <label class="field"><span>Category</span><select id="b-cat" name="cat">${catOptions(b.catId)}</select></label>
       ${profile.debts.length ? `<label class="field"><span>Pays down a debt? <span class="muted">(for card payments)</span></span><select id="b-debt" name="debt"><option value="">No</option>${profile.debts.map(d => `<option value="${esc(d.id)}" ${d.id === b.debtId ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></label>` : ''}
       <p class="err" id="b-err" hidden></p>
@@ -1491,10 +1512,10 @@ const forms = {
   bill(f, fd) {
     const amount = parseAmt(fd.get('amount')), freq = fd.get('freq'), day = Math.round(Number(fd.get('day')));
     const err = $('#b-err');
-    if (!(amount > 0) || (freq === 'monthly' && !(day >= 1 && day <= 31))) { err.textContent = 'Enter an amount and a due day between 1 and 31.'; err.hidden = false; return; }
-    const data = { name: String(fd.get('name')).trim(), amount, freq, dueDay: freq === 'monthly' ? day : 1, anchor: fd.get('anchor') || toStr(today()), catId: fd.get('cat'), debtId: fd.get('debt') || '' };
+    if (!(amount > 0) || (freq === 'monthly' && !(day >= 1 && day <= 31)) || (freq === 'once' && !fd.get('due'))) { err.textContent = freq === 'once' ? 'Enter an amount and a due date.' : 'Enter an amount and a due day between 1 and 31.'; err.hidden = false; return; }
+    const data = { name: String(fd.get('name')).trim(), amount, freq, dueDay: freq === 'monthly' ? day : 1, anchor: fd.get('anchor') || toStr(today()), due: freq === 'once' ? fd.get('due') : undefined, catId: fd.get('cat'), debtId: fd.get('debt') || '' };
     const id = f.dataset.id;
-    if (id) Object.assign(profile.bills.find(b => b.id === id), data); else profile.bills.push(Object.assign({ id: newId('b') }, data));
+    if (id) Object.assign(profile.bills.find(b => b.id === id), data); else profile.bills.push(Object.assign({ id: newId('b'), created: Date.now() }, data));
     saveProfile(); closeSheet(); render(); toast(id ? 'Bill saved' : 'Bill added');
   },
   goal(f, fd) {
@@ -1602,7 +1623,7 @@ document.addEventListener('change', e => {
   else if (t.name === 'ptype' && t.closest('[data-form="settings"]')) { const h = t.value === 'hourly'; $('#s-hourly').hidden = !h; $('#s-salary').hidden = h; }
   else if (t.id === 'ob-state') $('#ob-state-rate').hidden = t.value === 'MN';
   else if (t.name === 'state' && t.closest('[data-form="settings"]')) $('#s-state-rate').hidden = t.value === 'MN';
-  else if (t.name === 'freq' && t.closest('[data-form="bill"]')) { const bw = t.value === 'biweekly'; $('#b-day-wrap').hidden = bw; $('#b-anchor-wrap').hidden = !bw; }
+  else if (t.name === 'freq' && t.closest('[data-form="bill"]')) { const v = t.value; $('#b-day-wrap').hidden = v !== 'monthly'; $('#b-anchor-wrap').hidden = v !== 'biweekly'; $('#b-due-wrap').hidden = v !== 'once'; $('#b-once-hint').hidden = v !== 'once'; }
   else if (t.name === 'kind' && t.closest('[data-form="entry"]')) { $('#f-hours-wrap').hidden = t.value !== 'paycheck' || profile.pay.type !== 'hourly'; $('#f-spread-wrap').hidden = t.value !== 'scholarship'; $('#f-spread-hint').hidden = t.value !== 'scholarship'; $('#f-source').placeholder = t.value === 'scholarship' ? 'School or scholarship name' : t.value === 'paycheck' ? 'Employer' : 'Where from'; }
   else if (t.id === 'd-type') { const c = t.value === 'collection'; $('#d-coll').hidden = !c; }
   else if (t.name === 'nw' && t.closest('[data-form="entry"]')) { t.form.dataset.unw = '1'; refreshVerdict(); }

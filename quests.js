@@ -181,10 +181,11 @@ function petHTML() {
 /* ---------- Payday ceremony ---------- */
 function openPayday(inc) {
   const billAmt = billShare(), save = r2(inc.amount * profile.split.save / 100), rest = r2(inc.amount - billAmt - save);
-  const extra = profile.pay.type === 'hourly' && profile.typicalPay > 0 ? r2(inc.amount - profile.typicalPay) : 0;
+  const plan = profile.pay.mode === 'actual' ? (realPayAvg(inc.id) || 0) : profile.typicalPay;
+  const extra = plan > 0 ? r2(inc.amount - plan) : 0;
   const goalId = defaultGoalId(), goal = profile.goals.find(x => x.id === goalId);
-  const msg = extra > 20 ? `This check is ${money0(extra)} more than your plan. You worked for that. Send the extra to ${goal ? goal.name : 'savings'} too.`
-    : extra < -20 ? `This check is ${money0(-extra)} short of your plan. Tighter week. Bills and savings first, then what’s left is your real spending number.`
+  const msg = extra > 20 ? `This check is ${money0(extra)} more than ${profile.pay.mode === 'actual' ? 'your usual' : 'your plan'}. You worked for that. Send the extra to ${goal ? goal.name : 'savings'} too.`
+    : extra < -20 ? `This check is ${money0(-extra)} short of ${profile.pay.mode === 'actual' ? 'your usual' : 'your plan'}. Tighter week. Bills and savings first, then what’s left is your real spending number.`
     : 'Pay yourself first. Deposit the tribute now, then do the same transfer in your bank app.';
   const coins = Array.from({ length: 12 }, (_, i) => `<img class="sprite coin-drop" src="${spriteURL('coin')}" alt="" style="left:${5 + (i * 37) % 90}%;animation-delay:${(i % 6) * .12}s">`).join('');
   const bonusOpen = !all().some(e => e.type === 'save' && e.amount > 0 && e.date === inc.date && e.created < inc.created);

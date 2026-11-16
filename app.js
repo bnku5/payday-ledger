@@ -81,7 +81,7 @@ const TAX = {
 function defaultProfile() {
   return {
     v: 2, setupDone: false, payFrequency: 'biweekly', anchorPayday: toStr(today()), typicalPay: 0,
-    pay: { type: 'hourly', rate: 0, hours: 0, state: 'MN', stateRate: 0, pretax: 0, calib: null },
+    pay: { type: 'hourly', rate: 0, hours: 0, state: 'MN', stateRate: 0, pretax: 0, calib: null, mode: 'actual' },
     split: { needs: 50, wants: 30, save: 20 }, budgets: {}, bills: [], goals: [], debts: [], wants: [], rules: {}, freed: [],
     debtMethod: 'avalanche', debtExtra: 0, investing: false, matchDate: '', lastBackup: 0, pinHash: '', artiSeen: {}, createdAt: Date.now(),
   };
@@ -117,9 +117,16 @@ async function load() {
   entries = new Map(((saved && saved.entries) || []).map(e => [e.id, e]));
 }
 let BACKUP = null;
+/* Average of your last 3 real paychecks; it becomes your "usual paycheck" when you plan with real amounts. */
+function realPayAvg(excludeId) {
+  const checks = all().filter(e => e.type === 'income' && (e.kind || 'paycheck') === 'paycheck' && e.amount >= 50 && e.id !== excludeId)
+    .sort((a, b) => b.date.localeCompare(a.date) || (b.created || 0) - (a.created || 0)).slice(0, 3);
+  return checks.length ? r2(checks.reduce((s, e) => s + e.amount, 0) / checks.length) : 0;
+}
 let backupTimer = null;
 function persist() {
   BACKUP = null;
+  if (profile.pay.mode === 'actual' && entries) { const avg = realPayAvg(); if (avg) profile.typicalPay = avg; }
   const json = JSON.stringify({ profile, entries: [...entries.values()], savedAt: Date.now() });
   let mirrored = true;
   try { localStorage.setItem(LS_KEY, json); } catch (_) { mirrored = false; }
@@ -269,15 +276,17 @@ function periodSummary() {
   const spread = r2(all().filter(isSpread).reduce((s, e) => s + spreadShare(e, pp.start, pp.end), 0));
   const paycheckIn = sumAmt(ofType(list, 'income').filter(e => (e.kind || 'paycheck') === 'paycheck'));
   const expected = paycheckIn === 0;
-  const base = r2((expected ? (profile.typicalPay || 0) : 0) + direct + spread);
+  const waiting = expected && profile.pay.mode === 'actual';
+  const planned = expected && !waiting ? (profile.typicalPay || 0) : 0;
+  const base = r2(planned + direct + spread);
   const spent = sumAmt(ofType(list, 'expense').filter(e => !e.billKey));
   const saved = sumAmt(ofType(list, 'save'));
-  const plannedSave = r2(((expected ? (profile.typicalPay || 0) : 0) + direct) * profile.split.save / 100);
+  const plannedSave = r2((planned + direct) * profile.split.save / 100);
   const saveLeft = Math.max(0, r2(plannedSave - Math.max(saved, 0)));
   const billsLeft = billShare();
   const safe = r2(base - spent - saved - saveLeft - billsLeft);
   const daysLeft = Math.max(1, daysBetween(today(), pp.next));
-  return { pp, expected, base, spread, spent, saved, saveLeft, billsLeft, safe, daysLeft, perDay: safe / daysLeft, list };
+  return { pp, expected, waiting, base, spread, spent, saved, saveLeft, billsLeft, safe, daysLeft, perDay: safe / daysLeft, list };
 }
 
 /* The first pay period counts down from the bank balance you started with.
@@ -511,6 +520,11 @@ function viewHome() {
     <div class="stub-body">
       <div>
         <div class="safe-label">Safe to spend until payday</div>
+        ${s.waiting ? `<div class="safe-num" style="color:var(--gold)">PAYDAY</div>
+        <div class="safe-sub">Your pay period started ${short(s.pp.start)}. Type in what actually landed in your account and your number appears.</div>
+      </div>
+      <button class="btn primary block" data-action="add" data-type="income">Enter my paycheck</button>
+      ${s.spent > 0 ? `<p class="small muted">${money(s.spent)} spent so far this period.</p>` : ''}` : `
         <div class="safe-num ${s.safe < 0 ? 'neg' : ''}">${s.safe < 0 ? '−' : ''}${money0(Math.abs(s.safe))}</div>
         <div class="safe-sub">${s.safe > 0 ? `About <b class="num">${money0(s.perDay)}</b> a day for ${s.daysLeft} day${s.daysLeft === 1 ? '' : 's'}` : s.safe < 0 ? 'Over for this pay period. Wants wait until payday.' : 'Nothing left to spend this period.'}</div>
       </div>
@@ -523,8 +537,8 @@ function viewHome() {
       </div>
       <div class="btn-row">
         ${s.expected ? '<button class="btn sm primary" data-action="add" data-type="income">Log paycheck</button>' : ''}
-        ${profile.pay.type === 'hourly' ? '<button class="btn sm" data-action="estimator">Estimate a check</button>' : ''}
-      </div>
+        ${profile.pay.type === 'hourly' && profile.pay.mode !== 'actual' ? '<button class="btn sm" data-action="estimator">Estimate a check</button>' : ''}
+      </div>`}
     </div>
   </section>
 
@@ -1059,6 +1073,9 @@ function openSettings() {
         <label class="field"><span>State</span><select name="state" data-action="state-switch"><option value="MN" ${pay.state === 'MN' ? 'selected' : ''}>Minnesota</option><option value="other" ${pay.state !== 'MN' ? 'selected' : ''}>Another state</option></select></label>
         <label class="field" id="s-state-rate" ${pay.state === 'MN' ? 'hidden' : ''}><span>State tax %</span><input name="stateRate" inputmode="decimal" value="${pay.stateRate || ''}"></label>
       </div>
+      <div class="field"><span class="field-label">Before a paycheck is entered</span>
+        <div class="seg" role="radiogroup" aria-label="Paycheck planning"><label><input type="radio" name="payMode" value="actual" ${pay.mode !== 'estimate' ? 'checked' : ''}>Wait for the real amount</label><label><input type="radio" name="payMode" value="estimate" ${pay.mode === 'estimate' ? 'checked' : ''}>Use an estimate</label></div>
+        <span class="hint">${pay.mode !== 'estimate' && realPayAvg() ? `Your usual paycheck is ${money(realPayAvg())}, the average of your last real ones. ` : ''}Real amount: on payday you type in what landed, then your number appears. Estimate: plan ahead with the estimator until you do.</span></div>
       <label class="field" id="s-salary" ${pay.type === 'hourly' ? 'hidden' : ''}><span>Take-home per check</span><input name="pay" inputmode="decimal" value="${p.typicalPay ? p.typicalPay.toFixed(2) : ''}"></label>
       <div class="fields-2">
         <label class="field"><span>Paid</span><select name="freq">${Object.entries(FREQ).map(([k, f]) => `<option value="${k}" ${k === p.payFrequency ? 'selected' : ''}>${f.label}</option>`).join('')}</select></label>
@@ -1482,6 +1499,7 @@ const forms = {
     profile.payFrequency = fd.get('freq');
     profile.anchorPayday = fd.get('anchor') || profile.anchorPayday;
     profile.pay.type = type;
+    profile.pay.mode = fd.get('payMode') === 'estimate' ? 'estimate' : 'actual';
     if (type === 'hourly') {
       profile.pay.rate = parseAmt(fd.get('rate')) || profile.pay.rate;
       profile.pay.hours = parseFloat(fd.get('hours')) || profile.pay.hours;

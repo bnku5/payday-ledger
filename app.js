@@ -300,9 +300,41 @@ function startPeriodSummary(pp, sb) {
   const spent = sumAmt(ofType(after, 'expense'));
   const saved = sumAmt(ofType(after, 'save'));
   const billsLeft = r2(billsBetween(today() > parseD(sb.date) ? today() : parseD(sb.date), pp.end).filter(b => !b.paid).reduce((s, b) => s + Number(b.bill.amount || 0), 0));
-  const safe = r2(base - spent - saved - billsLeft);
+  const plannedSave = r2((Number(sb.amount) + income) * profile.split.save / 100);
+  const saveLeft = Math.max(0, r2(plannedSave - Math.max(saved, 0)));
+  const safe = r2(base - spent - saved - saveLeft - billsLeft);
   const daysLeft = Math.max(1, daysBetween(today(), pp.next));
-  return { pp, start: sb, expected: false, base, spread, spent, saved, saveLeft: 0, billsLeft, safe, daysLeft, perDay: safe / daysLeft, list: after };
+  return { pp, start: sb, expected: false, base, spread, spent, saved, saveLeft, billsLeft, safe, daysLeft, perDay: safe / daysLeft, list: after };
+}
+
+/* Splits a starting balance the same way as a paycheck: bills due before payday, your savings share, the rest to spend. */
+function openStartSplit() {
+  const sb = profile.startBalance; if (!sb) return;
+  const pp = payPeriod(), bills = billsBetween(parseD(sb.date), pp.end).filter(b => !b.paid);
+  const billAmt = r2(bills.reduce((s, b) => s + Number(b.bill.amount || 0), 0));
+  const save = r2(sb.amount * profile.split.save / 100);
+  const rest = r2(sb.amount - billAmt - save);
+  const days = Math.max(1, daysBetween(today(), pp.next));
+  const tight = rest < 0 || rest / days < 10;
+  const msg = sb.amount - billAmt < 0 ? 'Your bills before payday are more than what’s in the account. Skip savings this time and cover the bills first.'
+    : tight ? `That leaves about ${money0(Math.max(0, rest) / days)} a day. If that’s too tight, lower the tribute below. Something is better than nothing.`
+    : 'Leftovers count too. Pay yourself first, then the rest is yours to spend.';
+  openSheet('Starting gold', `
+    <div class="celebrate"><div class="big pop">STARTING GOLD</div>${sprite('chestOpen', 'pop')}<p>You set out with <b class="num" style="color:var(--gold);font-size:28px">${money(sb.amount)}</b></p><p class="small muted">to last until ${dLabel(pp.next)}</p></div>
+    <div class="card ledger">
+      <div class="row"><span class="key"><i class="dot" style="background:var(--warn)"></i>Bills due before payday (${bills.length})</span><span class="num">−${money(billAmt)}</span></div>
+      <div class="row"><span class="key"><i class="dot" style="background:var(--accent)"></i>Tribute to savings (${profile.split.save}%)</span><span class="num">−${money(save)}</span></div>
+      <div class="row total"><span>Free to spend</span><span class="num">${money(rest)}</span></div>
+    </div>
+    ${artiCard({ msg }, true)}
+    <form data-form="split">
+      <div class="fields-2">
+        <label class="field"><span>Tribute</span><input id="sp-amt" name="amount" inputmode="decimal" value="${(sb.amount - billAmt < 0 ? 0 : save).toFixed(2)}"></label>
+        <label class="field"><span>Into</span><select id="sp-goal" name="goal">${goalOptions(defaultGoalId())}</select></label>
+      </div>
+      <input type="hidden" name="date" value="${esc(toStr(today()))}">
+      <div class="btn-row"><button class="btn" type="button" data-action="close">Skip</button><button class="btn gold" type="submit">Deposit tribute</button></div>
+    </form>`);
 }
 
 function planSteps() {
@@ -386,13 +418,13 @@ function artiSays() {
   if (pendingN) return { msg: `I couldn’t tell if ${pendingN === 1 ? 'one purchase was' : pendingN + ' purchases were'} a need or a want. You make the call.`, act: ['tab', 'activity', 'Make the call'] };
   if (s.expected && sinceStart >= 1 && profile.typicalPay > 0) return { msg: `Did you get paid on ${short(s.pp.start)}? Log it so I’m working with real numbers, not guesses.`, act: ['add', 'income', 'Log paycheck'] };
   if (ready.length) return { msg: `“${ready[0].name}” has sat on your want list for two days. Still want it? Be honest.`, act: ['tab', 'home', ''] , wants: true };
-  if (s.saveLeft > 0 && !s.expected) return { msg: `You still owe yourself ${money0(s.saveLeft)} from this paycheck. Move it now, before it turns into DoorDash.`, act: ['save-now', s.saveLeft, 'Move it'] };
+  if (s.saveLeft > 0 && !s.expected) return { msg: `You still owe yourself ${money0(s.saveLeft)} from ${s.start ? 'your starting gold' : 'this paycheck'}. Move it now, before it turns into DoorDash.`, act: ['save-now', s.saveLeft, 'Move it'] };
   if (foodOut > 0 && (foodBudget ? foodOut > foodBudget : foodOut > 150)) return { msg: `Food you didn’t cook: ${money0(foodOut)} this month. That’s ${workHours(foodOut) || 'a lot of work'}. Pick two nights this week to cook. Just two.` };
   if (subsYear > 300) return { msg: `Your subscriptions cost ${money0(subsYear)} a year. Which one did you not open this month? Cancel that one.`, act: ['tab', 'budget', 'See them'] };
   if (cards.length && !profile.debtExtra) return { msg: `${cards[0].name} charges ${cards[0].apr}% interest. Every extra $25 you send there is a guaranteed ${cards[0].apr}% return. Nothing else pays that.`, act: ['tab', 'budget', 'Set extra payment'] };
   if (cushion > 0 && daily > 0) { const d = Math.floor(cushion / daily); if (d >= 3) return { msg: `You have ${d} days of expenses saved. A month ago that number was probably zero. Keep going.`, tone: 'good' }; }
   if (!loggedToday && new Date().getHours() >= 18) return { msg: 'Nothing logged today. Either you spent nothing (nice) or you forgot. Which is it?', act: ['add', 'expense', 'Log something'] };
-  if (s.perDay > 0) return { msg: `${money0(s.perDay)} a day until ${nextDay}. That’s your number. Stay under it and this paycheck works.`, tone: 'good' };
+  if (s.perDay > 0) return { msg: `${money0(s.perDay)} a day until ${nextDay}. That’s your number. Stay under it and you make it to payday.`, tone: 'good' };
   return { msg: 'Quiet day. Log anything you spent so tomorrow’s number is right.' };
 }
 function artiCard(a, inline) {
@@ -1390,7 +1422,7 @@ const forms = {
       'That’s all you need for now. More of the Ledgerlands opens up over your first week.',
       `Your first quest: fill the Ember Chest with $1,000. At ${money0(save)} a paycheck that’s about ${Math.ceil(STARTER_FUND / Math.max(1, save))} paychecks.`,
       'But first, tell me your bills and your debts. A hero should know the bosses on the road.',
-    ], [{ label: 'Add bills', fn: () => openBill() }, { label: 'Add debts', cls: 'primary', fn: () => openDebt() }, { label: 'Start adventuring' }], 'Tally Village');
+    ], [...(profile.startBalance ? [{ label: 'Budget my starting gold', cls: 'gold', fn: openStartSplit }] : []), { label: 'Add bills', fn: () => openBill() }, { label: 'Add debts', cls: 'primary', fn: () => openDebt() }, { label: 'Start adventuring' }], 'Tally Village');
   },
   entry(f, fd) {
     const amount = parseAmt(fd.get('amount'));
@@ -1512,8 +1544,10 @@ const forms = {
     profile.matchDate = fd.get('match') || '';
     const sbRaw = String(fd.get('startBal') || '').trim(), sbAmt = parseAmt(sbRaw);
     if (!sbRaw) delete profile.startBalance;
-    else if (isFinite(sbAmt) && (!profile.startBalance || sbAmt !== profile.startBalance.amount)) profile.startBalance = { amount: sbAmt, date: toStr(today()), at: Date.now() };
+    let newStart = false;
+    if (isFinite(sbAmt) && (!profile.startBalance || sbAmt !== profile.startBalance.amount)) { profile.startBalance = { amount: sbAmt, date: toStr(today()), at: Date.now() }; newStart = true; }
     saveProfile(); closeSheet(); render(); toast('Settings saved');
+    if (newStart) openStartSplit();
   },
   hero(f, fd) {
     const g = gs();

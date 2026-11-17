@@ -53,7 +53,7 @@ const nwOf = e => (e.nw === 'needs' || e.nw === 'wants') ? e.nw : catOf(e.catId)
 const FREQ = {
   weekly: { label: 'Every week', perYear: 52 },
   biweekly: { label: 'Every 2 weeks', perYear: 26 },
-  semimonthly: { label: 'Twice a month (1st & 15th)', perYear: 24 },
+  semimonthly: { label: 'Twice a month', perYear: 24 },
   monthly: { label: 'Once a month', perYear: 12 },
 };
 const SPLITS = {
@@ -83,6 +83,7 @@ function defaultProfile() {
     v: 2, setupDone: false, payFrequency: 'biweekly', anchorPayday: toStr(today()), typicalPay: 0,
     pay: { type: 'hourly', rate: 0, hours: 0, state: 'MN', stateRate: 0, pretax: 0, calib: null, mode: 'actual' },
     split: { needs: 50, wants: 30, save: 20 }, budgets: {}, bills: [], goals: [], debts: [], wants: [], rules: {}, freed: [],
+    semiDays: [15, 30], weekendFriday: false,
     debtMethod: 'avalanche', debtExtra: 0, investing: false, matchDate: '', lastBackup: 0, pinHash: '', artiSeen: {}, createdAt: Date.now(),
   };
 }
@@ -92,6 +93,7 @@ function normalize(p) {
   out.pay = Object.assign(defaultProfile().pay, out.pay || {});
   if (!p || !p.pay) { out.pay.type = out.typicalPay ? 'salary' : 'hourly'; }
   for (const k of ['bills', 'goals', 'debts', 'wants', 'freed']) if (!Array.isArray(out[k])) out[k] = [];
+  if (!Array.isArray(out.semiDays) || out.semiDays.length !== 2) out.semiDays = [15, 30];
   for (const k of ['budgets', 'rules', 'artiSeen']) if (!out[k] || typeof out[k] !== 'object') out[k] = {};
   for (const k of Object.keys(out.rules)) if (!out.rules[k] || typeof out.rules[k] !== 'object') delete out.rules[k];
   delete out.importSkipped;
@@ -194,16 +196,18 @@ function payPeriod(ref = today()) {
     const len = f === 'weekly' ? 7 : 14;
     const k = Math.floor(daysBetween(anchor, ref) / len);
     start = addDays(anchor, k * len); next = addDays(start, len);
-  } else if (f === 'semimonthly') {
-    const y = ref.getFullYear(), m = ref.getMonth();
-    if (ref.getDate() >= 15) { start = new Date(y, m, 15); next = new Date(y, m + 1, 1); }
-    else { start = new Date(y, m, 1); next = new Date(y, m, 15); }
   } else {
-    const day = anchor.getDate();
-    const mk = (y, m) => new Date(y, m, Math.min(day, dim(y, m)));
-    start = mk(ref.getFullYear(), ref.getMonth());
-    if (start > ref) start = mk(ref.getFullYear(), ref.getMonth() - 1);
-    next = mk(start.getFullYear(), start.getMonth() + 1);
+    // Twice a month on two chosen days, or once a month on the anchor's day. Day 30/31 means the last day in shorter months.
+    const days = f === 'semimonthly' ? [...profile.semiDays].map(Number).sort((a, b) => a - b) : [anchor.getDate()];
+    const shift = d => !profile.weekendFriday ? d : d.getDay() === 6 ? addDays(d, -1) : d.getDay() === 0 ? addDays(d, -2) : d;
+    const pays = [];
+    for (let k = -3; k <= 3; k++) {
+      const first = new Date(ref.getFullYear(), ref.getMonth() + k, 1);
+      for (const d of days) pays.push(shift(new Date(first.getFullYear(), first.getMonth(), Math.min(d, dim(first.getFullYear(), first.getMonth())))));
+    }
+    pays.sort((a, b) => a - b);
+    start = pays.filter(d => d <= ref).pop();
+    next = pays.find(d => d > start);
   }
   return { start, next, end: addDays(next, -1) };
 }
@@ -494,6 +498,7 @@ function render() {
   $('#top-title').textContent = profile.setupDone ? TITLES[ui.tab] : 'Payday Ledger';
   $('#top-eyebrow').textContent = profile.setupDone && ui.tab === 'home' ? dLabel(today(), { weekday: 'long', month: 'long', day: 'numeric' }) : '';
   $('#hud').innerHTML = profile.setupDone ? hudHTML() : '';
+  const heroTab = document.querySelector('.tab[data-tab="home"] img'); if (heroTab && profile.setupDone) heroTab.src = spriteURL('hero');
   if (!profile.setupDone) { view.innerHTML = viewOnboarding(); return; }
   const fn = { home: viewHome, quests: viewQuests, activity: viewActivity, budget: viewBudget, goals: viewGoals, insights: viewInsights }[ui.tab] || viewHome;
   const y = window.scrollY;
@@ -521,8 +526,16 @@ function viewOnboarding() {
     <label class="field" id="ob-salary" hidden><span>Take-home pay per check</span><input id="ob-pay" name="pay" inputmode="decimal" placeholder="$1,450"></label>
     <div class="fields-2">
       <label class="field"><span>Paid</span><select id="ob-freq" name="freq">${Object.entries(FREQ).map(([k, f]) => `<option value="${k}" ${k === 'biweekly' ? 'selected' : ''}>${f.label}</option>`).join('')}</select></label>
-      <label class="field"><span>Last payday</span><input id="ob-last" name="last" type="date" value="${toStr(today())}" required></label>
+      <label class="field" id="ob-anchor-wrap"><span>Last payday</span><input id="ob-last" name="last" type="date" value="${toStr(today())}"></label>
     </div>
+    <div class="stack" id="ob-semi" ${false ? '' : 'hidden'}>
+        <div class="fields-2">
+          <label class="field"><span>First payday</span><input name="semi1" type="number" min="1" max="31" value="${(profile.semiDays || [15, 30])[0]}"></label>
+          <label class="field"><span>Second payday</span><input name="semi2" type="number" min="1" max="31" value="${(profile.semiDays || [15, 30])[1]}"></label>
+        </div>
+        <span class="hint">Days of the month. 30 or 31 means the last day in shorter months.</span>
+      </div>
+      <label class="toggle"><span>If payday lands on a weekend, I’m paid the Friday before</span><input type="checkbox" name="wkfri" ${profile.weekendFriday ? 'checked' : ''}></label>
     <div class="fields-2">
       <label class="field"><span>State</span><select id="ob-state" name="state"><option value="MN">Minnesota</option><option value="other">Another state</option></select></label>
       <label class="field" id="ob-state-rate" hidden><span>State tax % (rough)</span><input name="stateRate" inputmode="decimal" placeholder="4.5"></label>
@@ -768,7 +781,7 @@ function viewGoals() {
   const skipped = profile.wants.filter(w => w.decided === 'skipped').reduce((s, w) => s + w.price, 0);
   const reg = REGIONS[reachedRegion()], cur = steps[current];
   return `
-  <section>${mapHTML()}<p class="small muted">Tap a place to talk to whoever lives there.</p></section>
+  <section>${mapHTML()}${exploreControlsHTML()}<p class="small muted">Tap anywhere to walk there, or use the pad. Walk into a town and press A to talk.</p></section>
   ${cur ? `<div class="card stack"><div class="row"><span class="pill gold-p">MAIN QUEST ${current + 1}/7</span><button class="link" data-action="region" data-id="${reg.id}">Talk to ${esc(NPCS[reg.npc].name.split(' ')[0])}</button></div><h3 style="font-size:10px;color:var(--gold)">${esc(reg.name)}</h3><p><b>${esc(cur.title)}.</b> <span style="color:var(--ink-2)">${esc(cur.text)}</span></p>${cur.toggle ? '' : bar(cur.progress)}</div>` : '<div class="card"><b>The main quest is complete.</b> The Far Isle awaits.</div>'}
   ${bossesHTML()}
   <div class="stats">
@@ -1132,8 +1145,16 @@ function openSettings() {
       <label class="field" id="s-salary" ${pay.type === 'hourly' ? 'hidden' : ''}><span>Take-home per check</span><input name="pay" inputmode="decimal" value="${p.typicalPay ? p.typicalPay.toFixed(2) : ''}"></label>
       <div class="fields-2">
         <label class="field"><span>Paid</span><select name="freq">${Object.entries(FREQ).map(([k, f]) => `<option value="${k}" ${k === p.payFrequency ? 'selected' : ''}>${f.label}</option>`).join('')}</select></label>
-        <label class="field"><span>A recent payday</span><input name="anchor" type="date" value="${esc(p.anchorPayday)}"></label>
+        <label class="field" id="s-anchor-wrap" ${p.payFrequency === 'semimonthly' ? 'hidden' : ''}><span>A recent payday</span><input name="anchor" type="date" value="${esc(p.anchorPayday)}"></label>
       </div>
+      <div class="stack" id="s-semi" ${p.payFrequency === 'semimonthly' ? '' : 'hidden'}>
+        <div class="fields-2">
+          <label class="field"><span>First payday</span><input name="semi1" type="number" min="1" max="31" value="${(profile.semiDays || [15, 30])[0]}"></label>
+          <label class="field"><span>Second payday</span><input name="semi2" type="number" min="1" max="31" value="${(profile.semiDays || [15, 30])[1]}"></label>
+        </div>
+        <span class="hint">Days of the month. 30 or 31 means the last day in shorter months.</span>
+      </div>
+      <label class="toggle"><span>If payday lands on a weekend, I’m paid the Friday before</span><input type="checkbox" name="wkfri" ${profile.weekendFriday ? 'checked' : ''}></label>
       <div class="field"><span class="field-label">Split each paycheck (%)</span>
         <div class="fields-3">
           <label class="field"><span class="hint">Needs</span><input name="needs" type="number" min="0" max="100" value="${p.split.needs}"></label>
@@ -1404,6 +1425,9 @@ const forms = {
     const type = fd.get('ptype');
     gs().name = String(fd.get('hero') || '').trim().slice(0, 16);
     profile.payFrequency = fd.get('freq');
+    { const d1 = Math.round(Number(fd.get('semi1'))), d2 = Math.round(Number(fd.get('semi2')));
+      if (d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && d1 !== d2) profile.semiDays = [Math.min(d1, d2), Math.max(d1, d2)];
+      profile.weekendFriday = !!fd.get('wkfri'); }
     profile.anchorPayday = fd.get('last') || toStr(today());
     profile.pay = Object.assign(profile.pay, { type, state: fd.get('state'), stateRate: parseFloat(fd.get('stateRate')) || 0 });
     if (type === 'hourly') {
@@ -1550,6 +1574,9 @@ const forms = {
     if (n + w + s !== 100 || [n, w, s].some(v => !(v >= 0))) { err.textContent = `Your split adds up to ${n + w + s}%. Make it 100%.`; err.hidden = false; return; }
     const type = fd.get('ptype');
     profile.payFrequency = fd.get('freq');
+    { const d1 = Math.round(Number(fd.get('semi1'))), d2 = Math.round(Number(fd.get('semi2')));
+      if (d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && d1 !== d2) profile.semiDays = [Math.min(d1, d2), Math.max(d1, d2)];
+      profile.weekendFriday = !!fd.get('wkfri'); }
     profile.anchorPayday = fd.get('anchor') || profile.anchorPayday;
     profile.pay.type = type;
     profile.pay.mode = fd.get('payMode') === 'estimate' ? 'estimate' : 'actual';
@@ -1622,6 +1649,10 @@ document.addEventListener('change', e => {
   else if (t.name === 'ptype' && t.closest('[data-form="setup"]')) { const h = t.value === 'hourly'; $('#ob-hourly').hidden = !h; $('#ob-hours-hint').hidden = !h; $('#ob-salary').hidden = h; }
   else if (t.name === 'ptype' && t.closest('[data-form="settings"]')) { const h = t.value === 'hourly'; $('#s-hourly').hidden = !h; $('#s-salary').hidden = h; }
   else if (t.id === 'ob-state') $('#ob-state-rate').hidden = t.value === 'MN';
+  else if (t.name === 'freq' && (t.closest('[data-form="settings"]') || t.closest('[data-form="setup"]'))) {
+    const pre = t.closest('[data-form="setup"]') ? 'ob' : 's', semi = t.value === 'semimonthly';
+    $(`#${pre}-semi`).hidden = !semi; $(`#${pre}-anchor-wrap`).hidden = semi;
+  }
   else if (t.name === 'state' && t.closest('[data-form="settings"]')) $('#s-state-rate').hidden = t.value === 'MN';
   else if (t.name === 'freq' && t.closest('[data-form="bill"]')) { const v = t.value; $('#b-day-wrap').hidden = v !== 'monthly'; $('#b-anchor-wrap').hidden = v !== 'biweekly'; $('#b-due-wrap').hidden = v !== 'once'; $('#b-once-hint').hidden = v !== 'once'; }
   else if (t.name === 'kind' && t.closest('[data-form="entry"]')) { $('#f-hours-wrap').hidden = t.value !== 'paycheck' || profile.pay.type !== 'hourly'; $('#f-spread-wrap').hidden = t.value !== 'scholarship'; $('#f-spread-hint').hidden = t.value !== 'scholarship'; $('#f-source').placeholder = t.value === 'scholarship' ? 'School or scholarship name' : t.value === 'paycheck' ? 'Employer' : 'Where from'; }

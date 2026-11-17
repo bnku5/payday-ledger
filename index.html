@@ -309,7 +309,19 @@ details > summary { cursor: pointer; font-family: var(--f-pixel); font-size: 9px
 .map-pin { position: absolute; transform: translate(-50%, -50%); width: 15%; aspect-ratio: 1; border: 0; background: none; padding: 0; }
 .map-pin span { position: absolute; left: 50%; top: 100%; transform: translateX(-50%); white-space: nowrap; font-family: var(--f-pixel); font-size: 7px; color: var(--ink); text-shadow: 1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000; pointer-events: none; }
 .map-pin.locked span { color: var(--muted); }
-.map-hero { position: absolute; width: 8%; height: auto; transform: translate(-50%, -85%); pointer-events: none; animation: bob 1s steps(2) infinite; }
+.map-hero { position: absolute; width: 8%; height: auto; scale: var(--face, 1) 1; transition: left .12s linear, top .12s linear; z-index: 2; transform: translate(-50%, -85%); pointer-events: none; animation: bob 1s steps(2) infinite; }
+.map-pet { z-index: 1; }
+.map-hero.bump { animation: bumped .25s steps(2), bob 1s steps(2) infinite; }
+@keyframes bumped { 50% { translate: 3px 0; } }
+.map-wrap { cursor: pointer; touch-action: manipulation; }
+.explore { display: grid; grid-template-columns: 132px minmax(0, 1fr) 64px; gap: 12px; align-items: center; }
+.dpad { display: grid; grid-template-columns: repeat(3, 42px); grid-template-rows: repeat(3, 42px); gap: 3px; }
+.dp { border: 3px solid var(--edge); background: var(--surface-2); box-shadow: var(--bevel); color: var(--gold); font-size: 16px; padding: 0; touch-action: none; user-select: none; -webkit-user-select: none; }
+.dp:active { transform: translateY(2px); box-shadow: none; background: var(--line); }
+.dp.up { grid-column: 2; grid-row: 1; } .dp.left { grid-column: 1; grid-row: 2; } .dp.right { grid-column: 3; grid-row: 2; } .dp.down { grid-column: 2; grid-row: 3; }
+.abtn { width: 60px; height: 60px; border-radius: 50%; border: 3px solid var(--edge); background: var(--heart); color: #fff; font-family: var(--f-pixel); font-size: 16px; box-shadow: inset -3px -3px 0 rgba(0,0,0,.3), 3px 3px 0 var(--edge); }
+.abtn:active { transform: translate(2px, 2px); box-shadow: none; }
+#map-here { min-height: 2.4em; }
 @keyframes bob { 50% { transform: translate(-50%, -95%); } }
 .boss { display: grid; grid-template-columns: 64px 1fr; gap: 12px; align-items: center; }
 .boss img { width: 64px; height: 64px; }
@@ -407,6 +419,7 @@ details > summary { cursor: pointer; font-family: var(--f-pixel); font-size: 9px
 <script src="receipts.js"></script>
 <script src="game.js"></script>
 <script src="quests.js"></script>
+<script src="explore.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

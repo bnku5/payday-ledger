@@ -294,6 +294,10 @@ function drawTile(ctx, t, x, y, seed) {
     px(6, 4, '#F4F0E6', 4, 2); px(7, 3, '#F4F0E6', 2, 1);
   }
 }
+/* A tile is fogged unless it's near a region you've reached or a side spot. */
+function isFogged(x, y, reached) {
+  return !(REGIONS.slice(0, reached + 1).some(r => Math.hypot(x - r.x, y - r.y) < 4.2) || SIDE.some(s => Math.hypot(x - s.x, y - s.y) < 2.2));
+}
 /* reached: index of the furthest region unlocked (0-based). */
 function drawMap(canvas, reached) {
   if (!TERRAIN) TERRAIN = buildTerrain();
@@ -305,10 +309,8 @@ function drawMap(canvas, reached) {
   const jobs = [...REGIONS.map(r => img(r.icon, r.x, r.y)), ...SIDE.map(s => img(s.icon, s.x, s.y, { pal: s.pal }))];
   return Promise.all(jobs).then(() => {
     // Fog over lands you haven't reached yet
-    const open = REGIONS.slice(0, reached + 1);
     for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
-      const near = open.some(r => Math.hypot(x - r.x, y - r.y) < 4.2) || SIDE.some(s => Math.hypot(x - s.x, y - s.y) < 2.2);
-      if (near) continue;
+      if (!isFogged(x, y, reached)) continue;
       ctx.fillStyle = 'rgba(6,9,8,.62)'; ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
       ctx.fillStyle = 'rgba(6,9,8,.35)';
       for (let i = 0; i < TILE; i += 4) for (let j = (i / 4) % 2 ? 2 : 0; j < TILE; j += 4) ctx.fillRect(x * TILE + j, y * TILE + i, 2, 2);

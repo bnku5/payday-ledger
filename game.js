@@ -222,7 +222,7 @@ function gameAfterRender() {
   if (typeof questsAfterRender === 'function') questsAfterRender();
   if (featureOn('quests')) checkTrophies(gameStats());
   const map = document.getElementById('map');
-  if (map && !map.dataset.drawn) { map.dataset.drawn = '1'; drawMap(map, reachedRegion()); }
+  if (map && !map.dataset.drawn) { map.dataset.drawn = '1'; drawMap(map, reachedRegion()); showHere(); }
   setTimeout(processCelebrations, 350);
 }
 
@@ -476,11 +476,11 @@ function openTrophies() {
 function mapHTML() {
   const reached = reachedRegion();
   const g = gs();
-  const pin = (r, i, side) => `<button class="map-pin ${!side && i > reached ? 'locked' : ''}" style="left:${(r.x + .5) / MAP_W * 100}%;top:${(r.y + .3) / MAP_H * 100}%" data-action="region" data-id="${r.id}" aria-label="${esc(r.name)}"><span>${esc(r.name)}</span></button>`;
-  const here = REGIONS[reached];
-  return `<div class="map-wrap"><canvas class="pix" id="map" width="320" height="240" aria-label="Map of the Ledgerlands"></canvas>
+  const pin = (r, i, side) => `<button class="map-pin ${!side && i > reached ? 'locked' : ''}" style="left:${(r.x + .5) / MAP_W * 100}%;top:${(r.y + .3) / MAP_H * 100}%" data-action="walk-region" data-id="${r.id}" aria-label="Walk to ${esc(r.name)}"><span>${esc(r.name)}</span></button>`;
+  const here = heroPos();
+  return `<div class="map-wrap" data-action="map-tap"><canvas class="pix" id="map" width="320" height="240" aria-label="Map of the Ledgerlands"></canvas>
     ${REGIONS.map((r, i) => pin(r, i)).join('')}${SIDE.map(s => pin(s, 0, true)).join('')}
-    <img class="sprite map-hero" src="${spriteURL('hero', { outfit: g.outfit, hat: g.hat })}" alt="You are here" style="left:${(here.x + .5) / MAP_W * 100}%;top:${(here.y + .5) / MAP_H * 100}%">${featureOn('pet') && petStage() > 0 ? petSprite(petStage(), 'map-hero map-pet').replace('class="sprite ', `style="left:${(here.x + 1.4) / MAP_W * 100}%;top:${(here.y + .7) / MAP_H * 100}%" class="sprite `) : ''}</div>`;
+    ${featureOn('pet') && petStage() > 0 ? petSprite(petStage(), 'map-hero map-pet').replace('class="sprite ', `id="map-pet" style="${tilePct(here.x, here.y, .25, .2)}" class="sprite `) : ''}<img class="sprite map-hero" id="map-hero" src="${spriteURL('hero', { outfit: g.outfit, hat: g.hat })}" alt="You" style="${tilePct(here.x, here.y)}"></div>`;
 }
 
 /* ---------- Actions and forms ---------- */

@@ -180,12 +180,12 @@ function petHTML() {
 
 /* ---------- Payday ceremony ---------- */
 function openPayday(inc) {
-  const billAmt = billShare(), save = r2(inc.amount * profile.split.save / 100), rest = r2(inc.amount - billAmt - save);
-  const plan = profile.pay.mode === 'actual' ? (realPayAvg(inc.id) || 0) : profile.typicalPay;
-  const extra = plan > 0 ? r2(inc.amount - plan) : 0;
-  const goalId = defaultGoalId(), goal = profile.goals.find(x => x.id === goalId);
-  const msg = extra > 20 ? `This check is ${money0(extra)} more than ${profile.pay.mode === 'actual' ? 'your usual' : 'your plan'}. You worked for that. Send the extra to ${goal ? goal.name : 'savings'} too.`
-    : extra < -20 ? `This check is ${money0(-extra)} short of ${profile.pay.mode === 'actual' ? 'your usual' : 'your plan'}. Tighter week. Bills and savings first, then what’s left is your real spending number.`
+  const r = runningBudget(), sp = splitOf(inc.amount);
+  const usual = realPayAvg(inc.id) || 0;
+  const extra = usual > 0 ? r2(inc.amount - usual) : 0;
+  const goal = profile.goals.find(x => x.id === defaultGoalId());
+  const msg = extra > 20 ? `This check is ${money0(extra)} more than your usual. You worked for that. Think about sending the extra to ${goal ? goal.name : 'savings'} too.`
+    : extra < -20 ? `This check is ${money0(-extra)} short of your usual. Tighter stretch. Bills and savings first, then what’s left is your real spending number.`
     : 'Pay yourself first. Deposit the tribute now, then do the same transfer in your bank app.';
   const coins = Array.from({ length: 12 }, (_, i) => `<img class="sprite coin-drop" src="${spriteURL('coin')}" alt="" style="left:${5 + (i * 37) % 90}%;animation-delay:${(i % 6) * .12}s">`).join('');
   const bonusOpen = !all().some(e => e.type === 'save' && e.amount > 0 && e.date === inc.date && e.created < inc.created);
@@ -193,21 +193,12 @@ function openPayday(inc) {
   openSheet('Payday!', `
     <div class="payday"><div class="coin-rain" aria-hidden="true">${coins}</div>
       <div class="celebrate"><div class="big pop">PAYDAY!</div>${sprite('chestOpen', 'pop')}<p>The guild pays its due: <b class="num" style="color:var(--gold);font-size:30px">${money(inc.amount)}</b></p>${inc.source ? `<p class="small muted">from ${esc(inc.source)}</p>` : ''}</div></div>
-    <div class="card ledger">
-      <div class="row"><span class="key"><i class="dot" style="background:var(--warn)"></i>Share of monthly bills</span><span class="num">−${money(billAmt)}</span></div>
-      <div class="row"><span class="key"><i class="dot" style="background:var(--accent)"></i>Tribute to savings (${profile.split.save}%)</span><span class="num">−${money(save)}</span></div>
-      <div class="row total"><span>Free to spend</span><span class="num">${money(rest)}</span></div>
-    </div>
+    <p class="small muted">Here’s how this check splits. It’s added to whatever you had left.</p>
+    ${splitLedgerHTML(sp)}
+    ${afterLedgerHTML(r)}
     ${artiCard({ msg }, true)}
     ${bonusOpen ? '<div class="callout"><p><b>Pay-yourself-first bonus:</b> deposit today and earn +25 XP and +5 gems on top.</p></div>' : ''}
-    <form data-form="split">
-      <div class="fields-2">
-        <label class="field"><span>Tribute</span><input id="sp-amt" name="amount" inputmode="decimal" value="${(save + Math.max(0, extra > 20 ? extra : 0)).toFixed(2)}"></label>
-        <label class="field"><span>Into</span><select id="sp-goal" name="goal">${goalOptions(goalId)}</select></label>
-      </div>
-      <input type="hidden" name="date" value="${esc(inc.date)}">
-      <div class="btn-row"><button class="btn" type="button" data-action="close">Skip</button><button class="btn gold" type="submit">Deposit tribute</button></div>
-    </form>`);
+    ${tributeFormHTML(r.saveOwed, inc.date)}`);
 }
 
 /* ---------- Monthly Chronicle ---------- */

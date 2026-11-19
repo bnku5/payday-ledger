@@ -241,17 +241,6 @@ const isOnce = b => b.freq === 'once';
 const billMonthly = b => isOnce(b) ? 0 : (Number(b.amount) || 0) * (b.freq === 'biweekly' ? 26 / 12 : 1);
 const billsMonthly = () => profile.bills.reduce((s, b) => s + billMonthly(b), 0);
 const billKey = (b, d) => b.id + ':' + (b.freq === 'monthly' || !b.freq ? ymStr(d) : toStr(d));
-/* Pay periods from the one containing a to the one containing b, counting both. */
-function periodsSpan(a, b) { let n = 1, p = payPeriod(a); while (p.end < b && n < 120) { p = payPeriod(p.next); n++; } return n; }
-/* One-time bills are saved up for evenly across the paychecks between when you added them and when they're due. */
-function onceShare() {
-  const pp = payPeriod();
-  return profile.bills.filter(b => isOnce(b) && !billPayment(billKey(b, parseD(b.due)))).reduce((s, b) => {
-    const due = parseD(b.due), amt = Number(b.amount) || 0;
-    return s + (due < pp.start ? amt : amt / periodsSpan(new Date(b.created || Date.now()), due));
-  }, 0);
-}
-const billShare = () => r2(billsMonthly() * 12 / ppy() + onceShare());
 const billPayment = key => all().find(e => e.billKey === key);
 function billDates(b, from, to) {
   const out = [];
@@ -287,74 +276,79 @@ function debtBalance(d) {
 const isCardDebt = d => d.type !== 'collection' && (d.type === 'card' || Number(d.apr) >= HIGH_APR);
 const collectionDone = d => debtBalance(d) <= .005;
 
-function periodSummary() {
-  const pp = payPeriod();
-  const sb = profile.startBalance;
-  if (sb && sb.date >= toStr(pp.start) && sb.date <= toStr(pp.end)) return startPeriodSummary(pp, sb);
-  const list = between(toStr(pp.start), toStr(pp.end));
-  const direct = sumAmt(ofType(list, 'income').filter(e => !isSpread(e)));
-  const spread = r2(all().filter(isSpread).reduce((s, e) => s + spreadShare(e, pp.start, pp.end), 0));
-  const paycheckIn = sumAmt(ofType(list, 'income').filter(e => (e.kind || 'paycheck') === 'paycheck'));
-  const expected = paycheckIn === 0;
-  const waiting = expected && profile.pay.mode === 'actual';
-  const planned = expected && !waiting ? (profile.typicalPay || 0) : 0;
-  const base = r2(planned + direct + spread);
-  const spent = sumAmt(ofType(list, 'expense').filter(e => !e.billKey));
+/* The running budget. Your starting balance and every income you log are split into needs, wants and savings.
+   Spending comes out of its pot, and whatever is left carries forward. No estimates, no months. */
+function ledgerStart() {
+  if (profile.startBalance) return profile.startBalance;
+  const d = new Date(profile.createdAt || Date.now());
+  return { amount: 0, date: toStr(d), at: 0 };
+}
+const sinceStart = () => { const sb = ledgerStart(); return all().filter(e => e.date >= sb.date && (e.created || 0) >= (sb.at || 0)); };
+const releasedAmt = e => isSpread(e) ? r2(spreadShare(e, parseD(e.date), today())) : e.amount;
+function runningBudget() {
+  const sb = ledgerStart(), list = sinceStart(), sp = profile.split, pp = payPeriod();
+  const incomes = sortEntries(ofType(list, 'income'));
+  const moneyIn = r2(Number(sb.amount || 0) + incomes.reduce((s, e) => s + releasedAmt(e), 0));
+  const exp = ofType(list, 'expense');
+  const needsUsed = sumAmt(exp.filter(e => nwOf(e) === 'needs')), wantsUsed = sumAmt(exp.filter(e => nwOf(e) === 'wants'));
   const saved = sumAmt(ofType(list, 'save'));
-  const plannedSave = r2((planned + direct) * profile.split.save / 100);
-  const saveLeft = Math.max(0, r2(plannedSave - Math.max(saved, 0)));
-  const billsLeft = billShare();
-  const safe = r2(base - spent - saved - saveLeft - billsLeft);
+  const pot = (k, used) => { const budget = r2(moneyIn * sp[k] / 100); return { pct: sp[k], budget, used, left: r2(budget - used) }; };
+  const pots = { needs: pot('needs', needsUsed), wants: pot('wants', wantsUsed), save: pot('save', saved) };
+  const left = r2(moneyIn - needsUsed - wantsUsed - saved);
+  const from = parseD(sb.date) > pp.start ? parseD(sb.date) : pp.start;
+  const bills = billsBetween(from, pp.end).filter(b => !b.paid);
+  const billsDue = r2(bills.reduce((s, b) => s + Number(b.bill.amount || 0), 0));
+  const saveOwed = Math.max(0, pots.save.left);
+  const safe = r2(left - saveOwed - billsDue);
   const daysLeft = Math.max(1, daysBetween(today(), pp.next));
-  return { pp, expected, waiting, base, spread, spent, saved, saveLeft, billsLeft, safe, daysLeft, perDay: safe / daysLeft, list };
+  const paidThisPeriod = ofType(between(toStr(pp.start), toStr(pp.end)), 'income').some(e => (e.kind || 'paycheck') === 'paycheck');
+  return { sb, pp, incomes, moneyIn, pots, left, needsUsed, wantsUsed, saved, saveOwed, bills, billsDue, safe, daysLeft, perDay: safe / daysLeft, expected: !paidThisPeriod };
 }
-
-/* The first pay period counts down from the bank balance you started with.
-   Only what you log after setting it counts, and bills still due before payday come out of it. */
-function startPeriodSummary(pp, sb) {
-  const to = toStr(pp.end);
-  const after = all().filter(e => e.date >= sb.date && e.date <= to && (e.created || 0) >= (sb.at || 0));
-  const spread = r2(after.filter(isSpread).reduce((s, e) => s + spreadShare(e, parseD(sb.date), pp.end), 0));
-  const income = sumAmt(ofType(after, 'income').filter(e => !isSpread(e)));
-  const base = r2(Number(sb.amount) + income + spread);
-  const spent = sumAmt(ofType(after, 'expense'));
-  const saved = sumAmt(ofType(after, 'save'));
-  const billsLeft = r2(billsBetween(today() > parseD(sb.date) ? today() : parseD(sb.date), pp.end).filter(b => !b.paid).reduce((s, b) => s + Number(b.bill.amount || 0), 0));
-  const plannedSave = r2((Number(sb.amount) + income) * profile.split.save / 100);
-  const saveLeft = Math.max(0, r2(plannedSave - Math.max(saved, 0)));
-  const safe = r2(base - spent - saved - saveLeft - billsLeft);
-  const daysLeft = Math.max(1, daysBetween(today(), pp.next));
-  return { pp, start: sb, expected: false, base, spread, spent, saved, saveLeft, billsLeft, safe, daysLeft, perDay: safe / daysLeft, list: after };
+/* The same numbers in the shape Arti and the quests read. */
+function periodSummary() {
+  const r = runningBudget();
+  return { pp: r.pp, expected: r.expected, waiting: false, base: r.moneyIn, spent: r2(r.needsUsed + r.wantsUsed), saved: r.saved, saveLeft: r.saveOwed, billsLeft: r.billsDue, safe: r.safe, daysLeft: r.daysLeft, perDay: r.perDay, start: profile.startBalance };
 }
+const splitOf = amt => ({ needs: r2(amt * profile.split.needs / 100), wants: r2(amt * profile.split.wants / 100), save: r2(amt * profile.split.save / 100) });
 
 /* Splits a starting balance the same way as a paycheck: bills due before payday, your savings share, the rest to spend. */
 function openStartSplit() {
   const sb = profile.startBalance; if (!sb) return;
-  const pp = payPeriod(), bills = billsBetween(parseD(sb.date), pp.end).filter(b => !b.paid);
-  const billAmt = r2(bills.reduce((s, b) => s + Number(b.bill.amount || 0), 0));
-  const save = r2(sb.amount * profile.split.save / 100);
-  const rest = r2(sb.amount - billAmt - save);
-  const days = Math.max(1, daysBetween(today(), pp.next));
-  const tight = rest < 0 || rest / days < 10;
-  const msg = sb.amount - billAmt < 0 ? 'Your bills before payday are more than what’s in the account. Skip savings this time and cover the bills first.'
-    : tight ? `That leaves about ${money0(Math.max(0, rest) / days)} a day. If that’s too tight, lower the tribute below. Something is better than nothing.`
+  const r = runningBudget(), sp = splitOf(sb.amount);
+  const msg = r.safe < 0 ? 'Your bills before payday are more than what’s in the account. Skip savings this time and cover the bills first.'
+    : r.perDay < 10 ? `That leaves about ${money0(Math.max(0, r.perDay))} a day. If that’s too tight, lower the savings amount below. Something is better than nothing.`
     : 'Leftovers count too. Pay yourself first, then the rest is yours to spend.';
   openSheet('Starting gold', `
-    <div class="celebrate"><div class="big pop">STARTING GOLD</div>${sprite('chestOpen', 'pop')}<p>You set out with <b class="num" style="color:var(--gold);font-size:28px">${money(sb.amount)}</b></p><p class="small muted">to last until ${dLabel(pp.next)}</p></div>
-    <div class="card ledger">
-      <div class="row"><span class="key"><i class="dot" style="background:var(--warn)"></i>Bills due before payday (${bills.length})</span><span class="num">−${money(billAmt)}</span></div>
-      <div class="row"><span class="key"><i class="dot" style="background:var(--accent)"></i>Tribute to savings (${profile.split.save}%)</span><span class="num">−${money(save)}</span></div>
-      <div class="row total"><span>Free to spend</span><span class="num">${money(rest)}</span></div>
-    </div>
+    <div class="celebrate"><div class="big pop">STARTING GOLD</div>${sprite('chestOpen', 'pop')}<p>You set out with <b class="num" style="color:var(--gold);font-size:28px">${money(sb.amount)}</b></p></div>
+    ${splitLedgerHTML(sp)}
+    ${afterLedgerHTML(r)}
     ${artiCard({ msg }, true)}
-    <form data-form="split">
+    ${tributeFormHTML(r.safe < 0 ? 0 : sp.save, toStr(today()))}`);
+}
+function splitLedgerHTML(sp) {
+  return `<div class="card ledger">
+    <div class="row"><span class="key"><i class="dot" style="background:var(--chart-spend)"></i>Needs (${profile.split.needs}%)</span><span class="num">${money(sp.needs)}</span></div>
+    <div class="row"><span class="key"><i class="dot" style="background:var(--want)"></i>Wants (${profile.split.wants}%)</span><span class="num">${money(sp.wants)}</span></div>
+    <div class="row"><span class="key"><i class="dot" style="background:var(--accent)"></i>Savings (${profile.split.save}%)</span><span class="num">${money(sp.save)}</span></div>
+  </div>`;
+}
+function afterLedgerHTML(r) {
+  return `<div class="card ledger">
+    <div class="row"><span class="key">Money left in total</span><span class="num">${money(r.left)}</span></div>
+    ${r.billsDue ? `<div class="row"><span class="key">Bills due before payday (${r.bills.length})</span><span class="num">−${money(r.billsDue)}</span></div>` : ''}
+    <div class="row"><span class="key">Savings to move</span><span class="num">−${money(r.saveOwed)}</span></div>
+    <div class="row total"><span>Safe to spend until ${short(r.pp.next)}</span><span class="num">${money(r.safe)}</span></div>
+  </div>`;
+}
+function tributeFormHTML(amt, date) {
+  return `<form data-form="split">
       <div class="fields-2">
-        <label class="field"><span>Tribute</span><input id="sp-amt" name="amount" inputmode="decimal" value="${(sb.amount - billAmt < 0 ? 0 : save).toFixed(2)}"></label>
+        <label class="field"><span>Move to savings</span><input id="sp-amt" name="amount" inputmode="decimal" value="${Math.max(0, amt).toFixed(2)}"></label>
         <label class="field"><span>Into</span><select id="sp-goal" name="goal">${goalOptions(defaultGoalId())}</select></label>
       </div>
-      <input type="hidden" name="date" value="${esc(toStr(today()))}">
+      <input type="hidden" name="date" value="${esc(date)}">
       <div class="btn-row"><button class="btn" type="button" data-action="close">Skip</button><button class="btn gold" type="submit">Deposit tribute</button></div>
-    </form>`);
+    </form>`;
 }
 
 function planSteps() {
@@ -438,7 +432,7 @@ function artiSays() {
   if (pendingN) return { msg: `I couldn’t tell if ${pendingN === 1 ? 'one purchase was' : pendingN + ' purchases were'} a need or a want. You make the call.`, act: ['tab', 'activity', 'Make the call'] };
   if (s.expected && sinceStart >= 1 && profile.typicalPay > 0) return { msg: `Did you get paid on ${short(s.pp.start)}? Log it so I’m working with real numbers, not guesses.`, act: ['add', 'income', 'Log paycheck'] };
   if (ready.length) return { msg: `“${ready[0].name}” has sat on your want list for two days. Still want it? Be honest.`, act: ['tab', 'home', ''] , wants: true };
-  if (s.saveLeft > 0 && !s.expected) return { msg: `You still owe yourself ${money0(s.saveLeft)} from ${s.start ? 'your starting gold' : 'this paycheck'}. Move it now, before it turns into DoorDash.`, act: ['save-now', s.saveLeft, 'Move it'] };
+  if (s.saveLeft > 0 && !s.expected) return { msg: `You still owe your savings ${money0(s.saveLeft)}. Move it now, before it turns into DoorDash.`, act: ['save-now', s.saveLeft, 'Move it'] };
   if (foodOut > 0 && (foodBudget ? foodOut > foodBudget : foodOut > 150)) return { msg: `Food you didn’t cook: ${money0(foodOut)} this month. That’s ${workHours(foodOut) || 'a lot of work'}. Pick two nights this week to cook. Just two.` };
   if (subsYear > 300) return { msg: `Your subscriptions cost ${money0(subsYear)} a year. Which one did you not open this month? Cancel that one.`, act: ['tab', 'budget', 'See them'] };
   if (cards.length && !profile.debtExtra) return { msg: `${cards[0].name} charges ${cards[0].apr}% interest. Every extra $25 you send there is a guaranteed ${cards[0].apr}% return. Nothing else pays that.`, act: ['tab', 'budget', 'Set extra payment'] };
@@ -553,15 +547,9 @@ function viewOnboarding() {
 }
 
 function viewHome() {
-  const s = periodSummary();
+  const r = runningBudget();
   const t = today();
-  const parts = [
-    { k: 'Spent', v: s.spent, c: 'var(--chart-spend)' },
-    { k: s.start ? 'Bills due before payday' : 'Bills set-aside', v: s.billsLeft, c: 'var(--warn)' },
-    { k: 'Savings', v: Math.max(s.saved, 0) + s.saveLeft, c: 'var(--accent)' },
-  ];
-  const total = Math.max(s.base, parts.reduce((a, p) => a + p.v, 0), 1);
-  const nextIn = daysBetween(t, s.pp.next);
+  const nextIn = daysBetween(t, r.pp.next);
   const upcoming = billsBetween(t, addDays(t, 14));
   const recent = sortEntries(all()).slice(0, 5);
   const wants = profile.wants.filter(w => !w.decided);
@@ -573,33 +561,28 @@ function viewHome() {
   ${heroCardHTML()}
   ${questNudgeHTML()}
   ${artiCard(artiSays())}
-  <section class="stub" aria-label="This pay period">
+  <section class="stub" aria-label="Your money">
     <div class="stub-top">
-      <div><div class="k">Pay period</div><div class="v">${short(s.pp.start)} – ${short(s.pp.end)}</div></div>
-      <div style="text-align:right"><div class="k">Next payday</div><div class="v">${dLabel(s.pp.next)} · ${nextIn === 1 ? 'tomorrow' : 'in ' + nextIn + ' days'}</div></div>
+      <div><div class="k">Money left</div><div class="v num ${r.left < 0 ? 'neg' : ''}" style="font-size:24px">${money(r.left)}</div></div>
+      <div style="text-align:right"><div class="k">Next payday</div><div class="v">${dLabel(r.pp.next)} · ${nextIn === 1 ? 'tomorrow' : 'in ' + nextIn + ' days'}</div></div>
     </div>
     <div class="stub-body">
       <div>
         <div class="safe-label">Safe to spend until payday</div>
-        ${s.waiting ? `<div class="safe-num" style="color:var(--gold)">PAYDAY</div>
-        <div class="safe-sub">Your pay period started ${short(s.pp.start)}. Type in what actually landed in your account and your number appears.</div>
+        <div class="safe-num ${r.safe < 0 ? 'neg' : ''}">${r.safe < 0 ? '−' : ''}${money0(Math.abs(r.safe))}</div>
+        <div class="safe-sub">${r.safe > 0 ? `About <b class="num">${money0(r.perDay)}</b> a day for ${r.daysLeft} day${r.daysLeft === 1 ? '' : 's'}` : r.safe < 0 ? 'You’re short until payday. Wants wait.' : 'Nothing free until payday.'}</div>
       </div>
-      <button class="btn primary block" data-action="add" data-type="income">Enter my paycheck</button>
-      ${s.spent > 0 ? `<p class="small muted">${money(s.spent)} spent so far this period.</p>` : ''}` : `
-        <div class="safe-num ${s.safe < 0 ? 'neg' : ''}">${s.safe < 0 ? '−' : ''}${money0(Math.abs(s.safe))}</div>
-        <div class="safe-sub">${s.safe > 0 ? `About <b class="num">${money0(s.perDay)}</b> a day for ${s.daysLeft} day${s.daysLeft === 1 ? '' : 's'}` : s.safe < 0 ? 'Over for this pay period. Wants wait until payday.' : 'Nothing left to spend this period.'}</div>
-      </div>
-      <div class="meter" role="img" aria-label="How this paycheck is split">${parts.map(p => p.v > 0 ? `<i style="width:${(p.v / total * 100).toFixed(1)}%;background:${p.c}"></i>` : '').join('')}${s.safe > 0 ? '<i style="flex:1;background:var(--line)"></i>' : ''}</div>
       <div class="ledger">
-        <div class="row"><span class="key">${s.start ? (s.base > s.start.amount ? 'Starting balance + income' : `Starting balance (${short(s.start.date)})`) : s.expected ? 'Expected paycheck' : 'Income this period'}</span><span class="num">${money(s.base)}</span></div>
-        ${s.spread > 0 ? `<div class="row small muted"><span>incl. scholarship spread</span><span class="num">${money(s.spread)}</span></div>` : ''}
-        ${parts.map(p => `<div class="row"><span class="key"><i class="dot" style="background:${p.c}"></i>${p.k}</span><span class="num">−${money(p.v)}</span></div>`).join('')}
-        <div class="row total"><span>Left to spend</span><span class="num">${money(s.safe)}</span></div>
+        <div class="row"><span class="key">Money left</span><span class="num">${money(r.left)}</span></div>
+        <div class="row"><span class="key"><i class="dot" style="background:var(--warn)"></i>Bills due before payday</span><span class="num">−${money(r.billsDue)}</span></div>
+        <div class="row"><span class="key"><i class="dot" style="background:var(--accent)"></i>Savings still to move</span><span class="num">−${money(r.saveOwed)}</span></div>
+        <div class="row total"><span>Safe to spend</span><span class="num">${money(r.safe)}</span></div>
       </div>
       <div class="btn-row">
-        ${s.expected ? '<button class="btn sm primary" data-action="add" data-type="income">Log paycheck</button>' : ''}
-        ${profile.pay.type === 'hourly' && profile.pay.mode !== 'actual' ? '<button class="btn sm" data-action="estimator">Estimate a check</button>' : ''}
-      </div>`}
+        ${r.expected ? '<button class="btn sm primary" data-action="add" data-type="income">Log paycheck</button>' : ''}
+        ${r.saveOwed > 0 ? `<button class="btn sm gold" data-action="save-now" data-amt="${r.saveOwed}">Move savings</button>` : ''}
+        <button class="btn sm" data-action="tab" data-tab="budget">See budget</button>
+      </div>
     </div>
   </section>
 
@@ -683,50 +666,51 @@ function viewActivity() {
 }
 
 function viewBudget() {
-  const ml = monthList(ui.month);
-  const exp = ofType(ml, 'expense');
-  const incLogged = sumAmt(ofType(ml, 'income'));
-  const income = incLogged || monthlyIncome();
-  const spentBy = {};
-  for (const e of exp) spentBy[e.catId || 'other'] = (spentBy[e.catId || 'other'] || 0) + e.amount;
-  const needs = sumAmt(exp.filter(e => nwOf(e) === 'needs'));
-  const wants = sumAmt(exp.filter(e => nwOf(e) === 'wants'));
-  const saved = sumAmt(ofType(ml, 'save'));
-  const sp = profile.split;
-  const splitRow = (label, val, pct, kind) => {
-    const target = income * pct / 100, frac = target > 0 ? val / target : 0, over = kind !== 'save' && frac > 1;
-    return `<div class="stack" style="gap:4px"><div class="row"><b>${label}</b><span class="small num">${money0(val)} <span class="muted">of ${money0(target)} · ${pct}%</span></span></div>${bar(frac, over ? 'bad' : kind === 'save' ? '' : frac > .85 ? 'warn' : '')}</div>`;
-  };
-  const rows = CATS.map(c => ({ c, b: Number(profile.budgets[c.id]) || 0, s: spentBy[c.id] || 0 })).filter(r => r.b > 0 || r.s > 0);
-  const cur = ui.month === ymStr(today());
-  const t = today();
-  const elapsed = cur ? t.getDate() / dim(t.getFullYear(), t.getMonth()) : 1;
+  const r = runningBudget(), sb = r.sb;
   const debts = profile.debts;
   const sim = simulatePayoff(profile.debtMethod, profile.debtExtra);
   const totalDebt = debts.reduce((s, d) => s + debtBalance(d), 0);
   const subs = profile.bills.filter(b => b.catId === 'subs' && !isOnce(b));
   const freedYear = profile.freed.reduce((s, f) => s + f.monthly * 12, 0);
   const colls = debts.filter(d => d.type === 'collection');
-
+  const incomeIn = r2(r.moneyIn - Number(sb.amount || 0));
+  const potCard = (name, key, color, note) => {
+    const p = r.pots[key], frac = p.budget > 0 ? p.used / p.budget : 0, over = p.left < 0;
+    return `<div class="card stack" style="gap:6px">
+      <div class="row"><b style="font-family:var(--f-pixel);font-size:10px;color:${color}">${name} · ${p.pct}%</b><span class="num" style="font-size:24px;${over ? 'color:var(--bad)' : ''}">${money(p.left)} <span class="small muted">${key === 'save' ? (p.left > 0 ? 'to move' : 'moved') : 'left'}</span></span></div>
+      ${bar(frac, key === 'save' ? '' : over ? 'bad' : frac > .85 ? 'warn' : '')}
+      <div class="row small muted"><span>${money(p.budget)} budgeted</span><span>${money(p.used)} ${key === 'save' ? 'moved' : 'spent'}</span></div>
+      ${note || ''}
+    </div>`;
+  };
   return `
-  ${monthNav()}
   <section>
-    <div class="sec-head"><h2>Needs, wants, savings</h2><button class="link" data-action="settings">Change split</button></div>
-    <div class="card stack" style="gap:14px">
-      ${splitRow('Needs', needs, sp.needs, 'needs')}
-      ${splitRow('Wants', wants, sp.wants, 'wants')}
-      ${splitRow('Savings', saved, sp.save, 'save')}
-      <p class="small muted">Based on ${incLogged ? 'income logged this month' : 'your expected pay'}: ${money0(income)}.</p>
+    <div class="sec-head"><h2>Your money</h2><button class="link" data-action="resync">Fix balance</button></div>
+    <div class="card ledger">
+      <div class="row"><span class="key">${profile.startBalance ? `Starting balance (${short(sb.date)})` : 'Starting balance'}</span><span class="num">${money(sb.amount || 0)}</span></div>
+      <div class="row"><span class="key">+ Income since (${r.incomes.length})</span><span class="num">${money(incomeIn)}</span></div>
+      <div class="row"><span class="key"><i class="dot" style="background:var(--chart-spend)"></i>− Spent on needs</span><span class="num">−${money(r.needsUsed)}</span></div>
+      <div class="row"><span class="key"><i class="dot" style="background:var(--want)"></i>− Spent on wants</span><span class="num">−${money(r.wantsUsed)}</span></div>
+      <div class="row"><span class="key"><i class="dot" style="background:var(--accent)"></i>− Moved to savings</span><span class="num">−${money(r.saved)}</span></div>
+      <div class="row total"><span>Money left</span><span class="num" style="font-size:26px">${money(r.left)}</span></div>
     </div>
+    <p class="small muted">This should match your bank account. If it doesn’t, tap Fix balance and enter what the bank says.</p>
   </section>
 
   <section>
-    <div class="sec-head"><h2>Category budgets</h2><button class="link" data-action="edit-budgets">Edit</button></div>
-    ${rows.length ? `<div class="list">${rows.map(({ c, b, s }) => {
-      const frac = b ? s / b : 1, over = b && s > b, pace = b && !over && cur && frac > elapsed + .15;
-      const status = !b ? '<span class="pill">No budget</span>' : over ? `<span class="pill bad">${money0(s - b)} over</span>` : pace ? '<span class="pill warn">Ahead of pace</span>' : `<span class="pill good">${money0(b - s)} left</span>`;
-      return `<div class="item" style="display:grid;gap:8px"><div class="row"><span class="title">${esc(c.name)}</span>${status}</div>${bar(frac, over ? 'bad' : pace ? 'warn' : '')}<div class="row small muted"><span class="num">${money(s)} spent</span><span class="num">${b ? 'of ' + money0(b) : ''}</span></div></div>`;
-    }).join('')}</div>` : '<div class="card empty"><strong>No budgets set</strong><button class="btn sm" data-action="edit-budgets">Set budgets</button></div>'}
+    <div class="sec-head"><h2>Where it’s budgeted</h2><button class="link" data-action="settings">Change split</button></div>
+    ${potCard('NEEDS', 'needs', 'var(--need)', r.billsDue ? `<p class="small">${money(r.billsDue)} of it is for bills due before payday, so <b>${money(r2(r.pots.needs.left - r.billsDue))}</b> is free for other needs.</p>` : '')}
+    ${potCard('WANTS', 'wants', 'var(--want)')}
+    ${potCard('SAVINGS', 'save', 'var(--accent)', r.saveOwed > 0 ? `<button class="btn sm gold" data-action="save-now" data-amt="${r.saveOwed}">Move ${money0(r.saveOwed)} to savings</button>` : '')}
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Every dollar in</h2><button class="link" data-action="add" data-type="income">Add income</button></div>
+    <div class="list">
+      ${r.incomes.map(e => { const a = releasedAmt(e), x = splitOf(a); return `<button class="item" data-action="edit-entry" data-id="${esc(e.id)}" style="display:grid;gap:4px"><div class="row"><span class="title">${esc(entryTitle(e))} · ${short(e.date)}</span><span class="amt in">+${money(a)}</span></div><div class="sub" style="white-space:normal">Needs ${money(x.needs)} · Wants ${money(x.wants)} · Savings ${money(x.save)}${isSpread(e) && a < e.amount ? ` · ${money(e.amount - a)} of this scholarship still to come` : ''}</div></button>`; }).join('')}
+      ${sb.amount ? (() => { const x = splitOf(sb.amount); return `<div class="item" style="display:grid;gap:4px"><div class="row"><span class="title">Starting balance · ${short(sb.date)}</span><span class="amt in">+${money(sb.amount)}</span></div><div class="sub" style="white-space:normal">Needs ${money(x.needs)} · Wants ${money(x.wants)} · Savings ${money(x.save)}</div></div>`; })() : ''}
+      ${!r.incomes.length && !sb.amount ? '<div class="empty"><strong>Nothing in yet</strong><span>Add your bank balance in Settings, or log a paycheck.</span></div>' : ''}
+    </div>
   </section>
 
   <section>
@@ -737,7 +721,7 @@ function viewBudget() {
     }).join('')}${profile.bills.filter(isOnce).sort((a, b) => a.due.localeCompare(b.due)).map(b => {
       const paid = !!billPayment(billKey(b, parseD(b.due))), late = !paid && parseD(b.due) < today();
       return `<button class="item" data-action="bill" data-id="${esc(b.id)}"><div class="glyph ${catOf(b.catId).group}" aria-hidden="true">1×</div><div class="main"><div class="title">${esc(b.name)}</div><div class="sub">One time · due ${short(b.due)}</div></div><span class="amt">${money(b.amount)}</span>${paid ? '<span class="pill good">Paid</span>' : late ? '<span class="pill bad">Late</span>' : ''}</button>`;
-    }).join('')}<div class="item"><div class="main"><b>Recurring per month</b><div class="sub" style="white-space:normal">${money(billShare())} set aside from each paycheck${onceShare() > 0 ? `, including ${money(onceShare())} toward one-time bills` : ''}</div></div><span class="amt">${money(billsMonthly())}</span></div></div>`
+    }).join('')}<div class="item"><div class="main"><b>Recurring per month</b><div class="sub" style="white-space:normal">Bills come out of your Needs. Ones due before payday are held back from Safe to spend.</div></div><span class="amt">${money(billsMonthly())}</span></div></div>`
       : '<div class="card empty"><strong>No bills yet</strong><span>Fixed bills get set aside from every paycheck automatically.</span><button class="btn sm" data-action="bill">Add a bill</button></div>'}
   </section>
 
@@ -1139,9 +1123,6 @@ function openSettings() {
         <label class="field"><span>State</span><select name="state" data-action="state-switch"><option value="MN" ${pay.state === 'MN' ? 'selected' : ''}>Minnesota</option><option value="other" ${pay.state !== 'MN' ? 'selected' : ''}>Another state</option></select></label>
         <label class="field" id="s-state-rate" ${pay.state === 'MN' ? 'hidden' : ''}><span>State tax %</span><input name="stateRate" inputmode="decimal" value="${pay.stateRate || ''}"></label>
       </div>
-      <div class="field"><span class="field-label">Before a paycheck is entered</span>
-        <div class="seg" role="radiogroup" aria-label="Paycheck planning"><label><input type="radio" name="payMode" value="actual" ${pay.mode !== 'estimate' ? 'checked' : ''}>Wait for the real amount</label><label><input type="radio" name="payMode" value="estimate" ${pay.mode === 'estimate' ? 'checked' : ''}>Use an estimate</label></div>
-        <span class="hint">${pay.mode !== 'estimate' && realPayAvg() ? `Your usual paycheck is ${money(realPayAvg())}, the average of your last real ones. ` : ''}Real amount: on payday you type in what landed, then your number appears. Estimate: plan ahead with the estimator until you do.</span></div>
       <label class="field" id="s-salary" ${pay.type === 'hourly' ? 'hidden' : ''}><span>Take-home per check</span><input name="pay" inputmode="decimal" value="${p.typicalPay ? p.typicalPay.toFixed(2) : ''}"></label>
       <div class="fields-2">
         <label class="field"><span>Paid</span><select name="freq">${Object.entries(FREQ).map(([k, f]) => `<option value="${k}" ${k === p.payFrequency ? 'selected' : ''}>${f.label}</option>`).join('')}</select></label>
@@ -1162,7 +1143,7 @@ function openSettings() {
           <label class="field"><span class="hint">Savings</span><input name="save" type="number" min="0" max="100" value="${p.split.save}"></label>
         </div></div>
       <label class="field"><span>Starting balance <span class="muted">(optional)</span></span><input name="startBal" inputmode="decimal" value="${p.startBalance ? Number(p.startBalance.amount).toFixed(2) : ''}" placeholder="$0.00">
-        <span class="hint">${p.startBalance ? `Set ${short(p.startBalance.date)}. ` : ''}What’s in your bank account right now. Your current pay period counts down from it until your next payday. Change it to start over from today.</span></label>
+        <span class="hint">${p.startBalance ? `Set ${short(p.startBalance.date)}. ` : ''}What’s in your bank account right now. Your budget starts from it, and every income you log adds on. If the app and your bank ever disagree, enter your real balance here and it starts fresh from today.</span></label>
       <label class="field"><span>401(k) match starts <span class="muted">(optional)</span></span><input name="match" type="date" value="${esc(p.matchDate || '')}"></label>
       <p class="err" id="s-err" hidden></p>
       <button class="btn primary block" type="submit">Save settings</button>
@@ -1375,6 +1356,7 @@ function toggleBill(el) {
 }
 
 const actions = {
+  resync: () => openSheet('Fix my balance', `<form data-form="resync"><p class="small muted">Enter what your bank account says right now. Your budget restarts from this amount today. Everything you logged before stays in your history and still counts for XP.</p><label class="amount-field"><span>$</span><input name="amount" inputmode="decimal" placeholder="0.00" aria-label="Bank balance" autofocus></label><button class="btn primary block" type="submit">Start from this balance</button></form>`),
   close: closeSheet,
   tab: el => { closeSheet(); if (location.hash.slice(1) === el.dataset.tab) window.scrollTo(0, 0); location.hash = el.dataset.tab; },
   add: el => openEntry(el.dataset.type || 'expense', null, el.dataset.goal ? { goalId: el.dataset.goal } : {}),
@@ -1420,6 +1402,12 @@ const actions = {
 };
 
 const forms = {
+  resync(f, fd) {
+    const amt = parseAmt(fd.get('amount'));
+    if (!isFinite(amt)) { toast('Enter your balance, like 312.40.'); return; }
+    profile.startBalance = { amount: amt, date: toStr(today()), at: Date.now() };
+    saveProfile(); closeSheet(); render(); openStartSplit();
+  },
   setup(f, fd) {
     const err = $('#ob-err');
     const type = fd.get('ptype');
@@ -1579,7 +1567,6 @@ const forms = {
       profile.weekendFriday = !!fd.get('wkfri'); }
     profile.anchorPayday = fd.get('anchor') || profile.anchorPayday;
     profile.pay.type = type;
-    profile.pay.mode = fd.get('payMode') === 'estimate' ? 'estimate' : 'actual';
     if (type === 'hourly') {
       profile.pay.rate = parseAmt(fd.get('rate')) || profile.pay.rate;
       profile.pay.hours = parseFloat(fd.get('hours')) || profile.pay.hours;

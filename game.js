@@ -78,7 +78,7 @@ function gameStats() {
   const perDay = {};
   for (const e of E) {
     const cls = classAt(e.created || 0), boost = e.boost ? 2 : 1;
-    (perDay[e.date] = perDay[e.date] || []).push(cls === 'sage' ? 4 : 2);
+    if (e.type !== 'adjust') (perDay[e.date] = perDay[e.date] || []).push(cls === 'sage' ? 4 : 2);
     if (e.type === 'save') { if (e.amount > 0) { dep += e.amount; depXP += e.amount * (cls === 'ranger' ? 1.25 : 1) * boost; } else wd -= e.amount; }
     if (e.type === 'expense' && (e.debtId || e.catId === 'debt')) { const m = cls === 'knight' ? 1.5 : 1; debtPaid += e.amount; debtXP += e.amount * m * boost; debtGems += e.amount / 10 * m; }
     if (e.type === 'income' && cls === 'rogue' && (e.kind || 'paycheck') === 'paycheck') extraXP += e.amount * .05;

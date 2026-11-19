@@ -290,7 +290,8 @@ function runningBudget() {
   const incomes = sortEntries(ofType(list, 'income'));
   const moneyIn = r2(Number(sb.amount || 0) + incomes.reduce((s, e) => s + releasedAmt(e), 0));
   const exp = ofType(list, 'expense');
-  const needsUsed = sumAmt(exp.filter(e => nwOf(e) === 'needs')), wantsUsed = sumAmt(exp.filter(e => nwOf(e) === 'wants'));
+  const fixes = ofType(list, 'adjust'), fixPart = k => r2(fixes.reduce((s, e) => s + (e.pot === k ? e.amount : e.pot === 'split' ? e.amount * profile.split[k] / (profile.split.needs + profile.split.wants || 1) : 0), 0));
+  const needsUsed = r2(sumAmt(exp.filter(e => nwOf(e) === 'needs')) - fixPart('needs')), wantsUsed = r2(sumAmt(exp.filter(e => nwOf(e) === 'wants')) - fixPart('wants'));
   const saved = sumAmt(ofType(list, 'save'));
   const pot = (k, used) => { const budget = r2(moneyIn * sp[k] / 100); return { pct: sp[k], budget, used, left: r2(budget - used) }; };
   const pots = { needs: pot('needs', needsUsed), wants: pot('wants', wantsUsed), save: pot('save', saved) };
@@ -302,7 +303,7 @@ function runningBudget() {
   const safe = r2(left - saveOwed - billsDue);
   const daysLeft = Math.max(1, daysBetween(today(), pp.next));
   const paidThisPeriod = ofType(between(toStr(pp.start), toStr(pp.end)), 'income').some(e => (e.kind || 'paycheck') === 'paycheck');
-  return { sb, pp, incomes, moneyIn, pots, left, needsUsed, wantsUsed, saved, saveOwed, bills, billsDue, safe, daysLeft, perDay: safe / daysLeft, expected: !paidThisPeriod };
+  return { sb, pp, incomes, fixes, fixTotal: sumAmt(fixes), moneyIn, pots, left, needsUsed, wantsUsed, saved, saveOwed, bills, billsDue, safe, daysLeft, perDay: safe / daysLeft, expected: !paidThisPeriod };
 }
 /* The same numbers in the shape Arti and the quests read. */
 function periodSummary() {
@@ -448,6 +449,7 @@ function artiCard(a, inline) {
 
 /* ---------- Render helpers ---------- */
 function glyph(e) {
+  if (e.type === 'adjust') return `<div class="glyph" aria-hidden="true">${sprite('gear')}</div>`;
   if (e.type === 'income') return `<div class="glyph income" aria-hidden="true">${sprite(e.kind === 'scholarship' ? 'scroll' : 'coin')}</div>`;
   if (e.type === 'save') return `<div class="glyph save" aria-hidden="true">${sprite(e.amount < 0 ? 'chestOpen' : 'chest')}</div>`;
   if (isWant(e)) return `<div class="glyph wants" aria-hidden="true">${sprite(e.treat ? 'ticket' : monsterOf(e.catId).sprite)}</div>`;
@@ -455,6 +457,7 @@ function glyph(e) {
   return `<div class="glyph ${nwOf(e)}" aria-hidden="true">${esc(c.name.slice(0, 2))}</div>`;
 }
 function entryTitle(e) {
+  if (e.type === 'adjust') return 'Balance fix';
   if (e.type === 'income') return e.source || INCOME_KINDS[e.kind || 'paycheck'];
   if (e.type === 'save') { const g = profile.goals.find(x => x.id === e.goalId); return (e.amount < 0 ? 'From ' : 'To ') + (g ? g.name : 'savings'); }
   return e.note || catOf(e.catId).name;
@@ -465,9 +468,11 @@ function entrySub(e) {
   else if (e.note && e.type !== 'income') parts.push(e.note);
   if (e.type === 'income') { parts.push(INCOME_KINDS[e.kind || 'paycheck']); if (e.hours) parts.push(e.hours + ' hrs'); if (isSpread(e)) parts.push(`spread over ${e.spreadMonths} months`); }
   if (e.type === 'save') parts.push('Savings');
-  return parts.join(' · ');
+  if (e.type === 'adjust') parts.push(e.amount < 0 ? 'Unlogged spending' : 'Correction', { needs: 'Needs', wants: 'Wants', split: 'Needs + Wants' }[e.pot] || '');
+  return parts.filter(Boolean).join(' · ');
 }
 function entryAmt(e) {
+  if (e.type === 'adjust') return `<span class="amt ${e.amount > 0 ? 'in' : ''}">${e.amount > 0 ? '+' : '−'}${money(Math.abs(e.amount))}</span>`;
   if (e.type === 'income') return `<span class="amt in">+${money(e.amount)}</span>`;
   if (e.type === 'save') return `<span class="amt">${e.amount < 0 ? '+' : '−'}${money(Math.abs(e.amount))}</span>`;
   return `<span class="amt">−${money(e.amount)}</span>`;
@@ -691,6 +696,7 @@ function viewBudget() {
       <div class="row"><span class="key">+ Income since (${r.incomes.length})</span><span class="num">${money(incomeIn)}</span></div>
       <div class="row"><span class="key"><i class="dot" style="background:var(--chart-spend)"></i>− Spent on needs</span><span class="num">−${money(r.needsUsed)}</span></div>
       <div class="row"><span class="key"><i class="dot" style="background:var(--want)"></i>− Spent on wants</span><span class="num">−${money(r.wantsUsed)}</span></div>
+      ${r.fixes.length ? `<div class="row"><span class="key">${r.fixTotal < 0 ? '−' : '+'} Balance fixes (${r.fixes.length})</span><span class="num">${r.fixTotal < 0 ? '−' : '+'}${money(Math.abs(r.fixTotal))}</span></div>` : ''}
       <div class="row"><span class="key"><i class="dot" style="background:var(--accent)"></i>− Moved to savings</span><span class="num">−${money(r.saved)}</span></div>
       <div class="row total"><span>Money left</span><span class="num" style="font-size:26px">${money(r.left)}</span></div>
     </div>
@@ -1142,8 +1148,10 @@ function openSettings() {
           <label class="field"><span class="hint">Wants</span><input name="wants" type="number" min="0" max="100" value="${p.split.wants}"></label>
           <label class="field"><span class="hint">Savings</span><input name="save" type="number" min="0" max="100" value="${p.split.save}"></label>
         </div></div>
-      <label class="field"><span>Starting balance <span class="muted">(optional)</span></span><input name="startBal" inputmode="decimal" value="${p.startBalance ? Number(p.startBalance.amount).toFixed(2) : ''}" placeholder="$0.00">
-        <span class="hint">${p.startBalance ? `Set ${short(p.startBalance.date)}. ` : ''}What’s in your bank account right now. Your budget starts from it, and every income you log adds on. If the app and your bank ever disagree, enter your real balance here and it starts fresh from today.</span></label>
+      <div class="field"><span class="field-label">Starting balance <span class="muted">(optional)</span></span>
+        <div class="fields-2"><label class="field"><span class="hint">Amount</span><input name="startBal" inputmode="decimal" value="${p.startBalance ? Number(p.startBalance.amount).toFixed(2) : ''}" placeholder="$0.00"></label>
+        <label class="field"><span class="hint">As of</span><input name="startDate" type="date" value="${esc(p.startBalance ? p.startBalance.date : toStr(today()))}" max="${toStr(today())}"></label></div>
+        <span class="hint">The balance your budget started from. Everything you log on or after that date counts. For small differences with your bank, use Fix balance on the Budget tab instead; it keeps your budget.</span></div>
       <label class="field"><span>401(k) match starts <span class="muted">(optional)</span></span><input name="match" type="date" value="${esc(p.matchDate || '')}"></label>
       <p class="err" id="s-err" hidden></p>
       <button class="btn primary block" type="submit">Save settings</button>
@@ -1304,7 +1312,7 @@ function csvExport() {
   const rows = [['Date', 'Type', 'Amount', 'Category', 'Need or want', 'Goal', 'From', 'Note']];
   for (const e of sortEntries(all())) {
     const g = profile.goals.find(x => x.id === e.goalId);
-    rows.push([e.date, e.type === 'save' ? 'savings' : e.type === 'income' ? INCOME_KINDS[e.kind || 'paycheck'] : 'expense', e.type === 'income' ? e.amount : -e.amount, e.type === 'expense' ? catOf(e.catId).name : '', e.type === 'expense' ? (nwOf(e) === 'needs' ? 'Need' : 'Want') : '', g ? g.name : '', e.source || '', e.note || '']);
+    rows.push([e.date, e.type === 'save' ? 'savings' : e.type === 'income' ? INCOME_KINDS[e.kind || 'paycheck'] : e.type === 'adjust' ? 'balance fix' : 'expense', e.type === 'income' || e.type === 'adjust' ? e.amount : -e.amount, e.type === 'expense' ? catOf(e.catId).name : '', e.type === 'expense' ? (nwOf(e) === 'needs' ? 'Need' : 'Want') : '', g ? g.name : '', e.source || '', e.note || '']);
   }
   return rows.map(r => r.map(q).join(',')).join('\n');
 }
@@ -1356,11 +1364,31 @@ function toggleBill(el) {
 }
 
 const actions = {
-  resync: () => openSheet('Fix my balance', `<form data-form="resync"><p class="small muted">Enter what your bank account says right now. Your budget restarts from this amount today. Everything you logged before stays in your history and still counts for XP.</p><label class="amount-field"><span>$</span><input name="amount" inputmode="decimal" placeholder="0.00" aria-label="Bank balance" autofocus></label><button class="btn primary block" type="submit">Start from this balance</button></form>`),
+  resync: () => {
+    const r = runningBudget();
+    openSheet('Fix my balance', `<form data-form="fixbal" data-left="${r.left}">
+      <div class="card ledger"><div class="row"><span class="key">The app says you have</span><span class="num">${money(r.left)}</span></div></div>
+      <label class="field"><span>What does your bank say?</span><span class="amount-field"><span>$</span><input id="fix-amt" name="amount" inputmode="decimal" placeholder="0.00" aria-label="Bank balance" autofocus></span></label>
+      <p id="fix-diff" class="small"></p>
+      <div class="stack" id="fix-less" hidden>
+        <span class="field-label">Where did it go?</span>
+        <div class="seg" role="radiogroup" aria-label="Which part it came from"><label><input type="radio" name="pot" value="wants" checked>Wants</label><label><input type="radio" name="pot" value="needs">Needs</label><label><input type="radio" name="pot" value="split">Both</label></div>
+        <span class="hint">It’s logged as one “unlogged spending” entry. It doesn’t cost hearts.</span>
+      </div>
+      <div class="stack" id="fix-more" hidden>
+        <span class="field-label">Where did it come from?</span>
+        <div class="seg" role="radiogroup" aria-label="What the extra money is"><label><input type="radio" name="more" value="income" checked>Income I didn’t log</label><label><input type="radio" name="more" value="fix">Just correct it</label></div>
+        <span class="hint">Income gets split into needs, wants and savings like a paycheck. A correction just adds it back to Wants.</span>
+      </div>
+      <button class="btn primary block" type="submit">Fix it</button>
+      <button class="link" type="button" data-action="restart-budget">Start a brand-new budget instead</button>
+    </form>`);
+  },
+  'restart-budget': () => openSheet('Start a new budget', `<form data-form="resync"><p class="small muted">This throws away your current budget and starts a new one from this balance today. Only do this for a fresh start. To match your bank, use Fix balance instead. Your history and XP stay either way.</p><label class="amount-field"><span>$</span><input name="amount" inputmode="decimal" placeholder="0.00" aria-label="Bank balance" autofocus></label><button class="btn primary block" type="submit">Start from this balance</button></form>`),
   close: closeSheet,
   tab: el => { closeSheet(); if (location.hash.slice(1) === el.dataset.tab) window.scrollTo(0, 0); location.hash = el.dataset.tab; },
   add: el => openEntry(el.dataset.type || 'expense', null, el.dataset.goal ? { goalId: el.dataset.goal } : {}),
-  'edit-entry': el => { const e = entries.get(el.dataset.id); if (e) openEntry(e.type, e); },
+  'edit-entry': el => { const e = entries.get(el.dataset.id); if (!e) return; if (e.type === 'adjust') confirmSheet('Remove this balance fix?', `It ${e.amount < 0 ? 'took' : 'added'} ${money(Math.abs(e.amount))}. Removing it puts your money left back where it was before the fix.`, 'Remove fix', () => { deleteEntry(e.id); toast('Fix removed'); }); else openEntry(e.type, e); },
   'delete-entry': el => confirmSheet('Delete this entry?', 'It will be removed from your history and totals.', 'Delete', () => { deleteEntry(el.dataset.id); toast('Deleted'); }),
   'save-now': el => openEntry('save', null, { amount: Number(el.dataset.amt) }),
   'toggle-bill': toggleBill,
@@ -1402,6 +1430,14 @@ const actions = {
 };
 
 const forms = {
+  fixbal(f, fd) {
+    const bank = parseAmt(fd.get('amount')), diff = r2(bank - Number(f.dataset.left));
+    if (!isFinite(bank)) { toast('Enter your bank balance, like 312.40.'); return; }
+    if (Math.abs(diff) < .01) { closeSheet(); toast('Already matches your bank.'); return; }
+    if (diff > 0 && fd.get('more') === 'income') putEntry({ id: newId('e'), type: 'income', kind: 'other', amount: diff, source: 'Unlogged income', date: toStr(today()), created: Date.now() });
+    else putEntry({ id: newId('e'), type: 'adjust', amount: diff, pot: diff > 0 ? 'wants' : fd.get('pot') || 'wants', date: toStr(today()), created: Date.now() });
+    closeSheet(); render(); toast(`Fixed. Your money left now matches your bank: ${money(bank)}.`);
+  },
   resync(f, fd) {
     const amt = parseAmt(fd.get('amount'));
     if (!isFinite(amt)) { toast('Enter your balance, like 312.40.'); return; }
@@ -1580,7 +1616,11 @@ const forms = {
     const sbRaw = String(fd.get('startBal') || '').trim(), sbAmt = parseAmt(sbRaw);
     if (!sbRaw) delete profile.startBalance;
     let newStart = false;
-    if (isFinite(sbAmt) && (!profile.startBalance || sbAmt !== profile.startBalance.amount)) { profile.startBalance = { amount: sbAmt, date: toStr(today()), at: Date.now() }; newStart = true; }
+    const sbDate = fd.get('startDate') && fd.get('startDate') <= toStr(today()) ? fd.get('startDate') : toStr(today());
+    if (isFinite(sbAmt) && (!profile.startBalance || sbAmt !== profile.startBalance.amount || sbDate !== profile.startBalance.date)) {
+      profile.startBalance = { amount: sbAmt, date: sbDate, at: sbDate === toStr(today()) ? Date.now() : parseD(sbDate).getTime() };
+      newStart = sbDate === toStr(today());
+    }
     saveProfile(); closeSheet(); render(); toast('Settings saved');
     if (newStart) openStartSplit();
   },
@@ -1627,6 +1667,11 @@ document.addEventListener('input', e => {
   else if (t.id === 'est-hours' || t.id === 'est-ot') updateEstimator();
   else if (t.id === 'f-amount' && $('#f-work')) { $('#f-work').textContent = workHours(parseAmt(t.value)); refreshVerdict(); }
   else if (t.id === 'f-what') refreshVerdict();
+  else if (t.id === 'fix-amt') {
+    const f = t.form, bank = parseAmt(t.value), diff = r2(bank - Number(f.dataset.left));
+    $('#fix-less').hidden = !(diff < -.005); $('#fix-more').hidden = !(diff > .005);
+    $('#fix-diff').innerHTML = !isFinite(bank) ? '' : Math.abs(diff) < .01 ? 'That matches. Nothing to fix.' : diff < 0 ? `You have <b>${money(-diff)} less</b> than the app thinks. That’s usually spending you didn’t log.` : `You have <b>${money(diff)} more</b> than the app thinks.`;
+  }
   else if (t.id === 'q-what' || t.id === 'q-amt') { const amt = parseAmt($('#q-amt').value) || 0; $('#q-verdict').innerHTML = verdictHTML(judge($('#q-what').value, amt), amt); }
   else if (t.id === 'w-price') $('#w-work').textContent = workHours(parseAmt(t.value)) ? 'That’s ' + workHours(parseAmt(t.value)) + '.' : '';
 });

@@ -1,5 +1,5 @@
 // Network first so updates arrive; the cache keeps the app working offline.
-const CACHE = 'payday-ledger-v11';
+const CACHE = 'payday-ledger-v12';
 const SHELL = ['./', './index.html', './app.js', './game.js', './quests.js', './explore.js', './sprites.js', './receipts.js', './fonts/press-start-2p.woff2', './fonts/vt323.woff2', './manifest.webmanifest', './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', e => {
